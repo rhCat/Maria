@@ -58,6 +58,9 @@ export interface BrowserManageResponse {
  *  so the desktop can replace its transcript from it rather than leaving stale
  *  bubbles on screen. `summary` carries the "compressed N → M messages" line. */
 export interface SessionCompressResponse {
+  host_ack?: {
+    output?: string
+  }
   info?: {
     title?: string
     usage?: Partial<UsageStats>

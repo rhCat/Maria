@@ -550,6 +550,7 @@ class ComputeHost:
             if command:
                 output = server._mirror_slash_side_effects(sid, session, command)
             with session["history_lock"]:
+                messages = server._history_to_messages(list(session.get("history") or []))
                 history_version = int(session.get("history_version", 0))
                 message_count = len(session.get("history") or [])
                 session_key = str(session.get("session_key") or "")
@@ -563,6 +564,7 @@ class ComputeHost:
                     "session_key": session_key,
                     "history_version": history_version,
                     "message_count": message_count,
+                    "messages": messages,
                     "session_info": server._session_info(session.get("agent"), session),
                 }
             )

@@ -8810,7 +8810,19 @@ def _(rid, params: dict) -> dict:
         if ack.get("type") in {"control.error", "error"}:
             return _err(rid, 4009, str(ack.get("message") or "compute-host compress failed"))
         _apply_compute_host_metadata_mirror(session, ack)
-        return _ok(rid, {"status": "compressed", "turn_isolation": True, "host_ack": ack})
+        host_info = ack.get("session_info") if isinstance(ack.get("session_info"), dict) else {}
+        host_messages = ack.get("messages") if isinstance(ack.get("messages"), list) else []
+        return _ok(
+            rid,
+            {
+                "status": "compressed",
+                "turn_isolation": True,
+                "host_ack": ack,
+                "info": host_info,
+                "messages": host_messages,
+                "usage": host_info.get("usage") if isinstance(host_info.get("usage"), dict) else {},
+            },
+        )
     session, err = _sess(params, rid)
     if err:
         return err
