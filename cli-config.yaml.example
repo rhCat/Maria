@@ -1506,3 +1506,28 @@ updates:
 #     binary_path: ""                               # "" = resolve op via PATH; else absolute path
 #     cache_ttl_seconds: 300                        # 0 disables BOTH cache layers
 #     override_existing: true                       # resolved values win over existing env
+
+# =============================================================================
+# Governance (cyberware) — mandatory tool-use gate
+# =============================================================================
+# When enabled, EVERY tool call is gated by an external cyberware govd node
+# (agent/govern_gate.py) before it runs: the call is mapped to a value-free
+# claim against the `hermes:toolgate` governed skill and POSTed to govd's
+# /govern endpoint. The signed allow / reject / push_back verdict is the
+# bottom decision authority, superseding the local heuristic dangerous-command
+# approval tier in tools/approval.py (the unconditional hardline / sudo floor
+# is kept beneath as defense-in-depth).
+#
+# Rollout: keep `enabled: false` until `hermes:toolgate` shows verified:true
+# in the node's /catalog and a principal token is provisioned — a fail-closed
+# gate against an absent skill blocks every tool. Env vars (frozen at import,
+# so an injected tool result cannot flip them) override these values:
+#   HERMES_GOVERN_ENABLED, HERMES_GOVERN_URL, HERMES_GOVERN_TOKEN_FILE,
+#   HERMES_GOVERN_FAIL_OPEN, HERMES_GOVERN_TIMEOUT.
+#
+# governance:
+#   enabled: false                       # master switch (default off)
+#   url: "http://100.101.222.80:5773"    # govd node BASE (:5773)
+#   token_file: "~/.cyberware/maria-agent.token"  # chmod 600 principal token pointer
+#   fail_open: false                     # true = allow when govd is unreachable (NOT recommended)
+#   timeout: 8.0                         # seconds per /govern round-trip
