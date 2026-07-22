@@ -1037,6 +1037,7 @@ def handle_function_call(
     tool_request_middleware_trace: Optional[List[Dict[str, Any]]] = None,
     enabled_toolsets: Optional[List[str]] = None,
     disabled_toolsets: Optional[List[str]] = None,
+    skip_govern_gate: bool = False,
 ) -> str:
     """
     Main function call dispatcher that routes calls to the tool registry.
@@ -1067,6 +1068,29 @@ def handle_function_call(
     if not isinstance(function_args, dict):
         function_args = {}
     _tool_middleware_trace = list(tool_request_middleware_trace or [])
+
+    # H3: mandatory governance gate at the dispatcher level. The executor gates
+    # every model-issued tool call and passes skip_govern_gate=True; this branch
+    # therefore only fires for RE-ENTRY paths that reach the registry BELOW the
+    # executor — execute_code-spawned tool calls (code_execution_tool.py) and
+    # plugin dispatch (hermes_cli/plugins.py). Without it those slip past the
+    # gate after a single exec approval. Fail-closed like the executor gate.
+    if not skip_govern_gate:
+        try:
+            from agent import govern_gate as _gg
+            if _gg.is_enabled():
+                _verdict = _gg.govern_tool_call(
+                    function_name, function_args, session_key=session_id or "",
+                )
+                if not _verdict.allowed:
+                    return json.dumps({"error": _verdict.block_message()}, ensure_ascii=False)
+        except Exception as _gg_err:
+            logger.error("govern_gate re-entry check failed, denying %s: %s",
+                         function_name, _gg_err)
+            return json.dumps(
+                {"error": f"BLOCKED: cyberware governance unavailable ({_gg_err})."},
+                ensure_ascii=False,
+            )
 
     # ── Tool Search bridge dispatch ──────────────────────────────────
     # tool_search and tool_describe are pure catalog reads — handle them

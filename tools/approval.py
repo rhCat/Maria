@@ -3218,6 +3218,20 @@ def check_all_command_guards(command: str, env_type: str,
                        deny_pattern, command[:200])
         return _user_deny_block_result(deny_pattern)
 
+    # Cyberware governance is the bottom decision authority. When it is enabled,
+    # this command was already gated by govd at the executor chokepoint
+    # (agent/govern_gate.py). The unconditional hardline / sudo-stdin / user-deny
+    # floor ABOVE is retained as defense-in-depth, but the local heuristic
+    # dangerous-pattern tier below — and its non-interactive fail-open — is
+    # superseded by the external, signed verdict. Governance disabled (default):
+    # behavior is unchanged.
+    try:
+        from agent import govern_gate as _govern_gate
+        if _govern_gate.is_enabled():
+            return {"approved": True, "message": None}
+    except Exception:
+        pass
+
     # --yolo or approvals.mode=off: bypass all approval prompts.
     # Gateway /yolo is session-scoped; CLI --yolo remains process-scoped.
     approval_mode = _get_approval_mode()
@@ -3646,6 +3660,16 @@ def check_execute_code_guard(code: str, env_type: str,
         return {"approved": True, "message": None}
     if _should_skip_container_guards(env_type, has_host_access=has_host_access):
         return {"approved": True, "message": None}
+
+    # Cyberware governance is the bottom decision authority: when enabled, this
+    # execute_code call was already gated by govd (exec perk) at the executor
+    # chokepoint, superseding the local trusted-by-config auto-approve above.
+    try:
+        from agent import govern_gate as _govern_gate
+        if _govern_gate.is_enabled():
+            return {"approved": True, "message": None}
+    except Exception:
+        pass
 
     # --yolo or approvals.mode=off: bypass (session- or process-scoped).
     approval_mode = _get_approval_mode()

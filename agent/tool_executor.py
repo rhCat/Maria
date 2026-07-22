@@ -164,6 +164,45 @@ def _is_interpreter_shutdown_submit_error(exc: RuntimeError) -> bool:
     return "cannot schedule new futures after interpreter shutdown" in str(exc)
 
 
+def _apply_govern_gate(agent, function_name: str, function_args: dict) -> Optional[str]:
+    """Mandatory cyberware governance gate for one tool call.
+
+    Returns ``None`` to allow execution, or a block message string to deny.
+    A govd ``push_back`` is resolved to allow/deny inside the gate via the
+    existing per-thread human-approval callback, so this only ever surfaces a
+    terminal allow/deny. Any unexpected error fails closed (deny) — matching
+    the gate's own fail-closed posture — unless governance is disabled.
+    """
+    try:
+        from agent import govern_gate
+    except Exception as exc:  # pragma: no cover - import guard
+        logger.error("govern_gate import failed, denying %s: %s", function_name, exc)
+        return f"BLOCKED: cyberware governance unavailable ({exc})."
+
+    if not govern_gate.is_enabled():
+        return None
+
+    # Reuse the same per-thread approval callback the terminal guard uses, so a
+    # govd push_back surfaces through the CLI prompt / gateway queue already
+    # wired for this session.
+    approval_cb = None
+    try:
+        from tools.terminal_tool import _get_approval_callback
+        approval_cb = _get_approval_callback()
+    except Exception:
+        approval_cb = None
+
+    verdict = govern_gate.govern_tool_call(
+        function_name,
+        function_args or {},
+        session_key=getattr(agent, "session_id", "") or "",
+        approval_callback=approval_cb,
+    )
+    if verdict.allowed:
+        return None
+    return verdict.block_message()
+
+
 def _emit_terminal_post_tool_call(
     agent,
     *,
@@ -518,6 +557,25 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                         error_message=getattr(guardrail_decision, "message", None) or "Tool blocked by guardrail policy",
                         middleware_trace=list(middleware_trace),
                     )
+
+        # ── Mandatory cyberware governance gate ─────────────────────
+        # Bottom decision authority for every concurrent tool call too.
+        if block_result is None:
+            _govern_block = _apply_govern_gate(agent, function_name, function_args)
+            if _govern_block is not None:
+                block_result = json.dumps({"error": _govern_block}, ensure_ascii=False)
+                _emit_terminal_post_tool_call(
+                    agent,
+                    function_name=function_name,
+                    function_args=function_args,
+                    result=block_result,
+                    effective_task_id=effective_task_id,
+                    tool_call_id=getattr(tool_call, "id", "") or "",
+                    status="blocked",
+                    error_type="govern_block",
+                    error_message=_govern_block,
+                    middleware_trace=list(middleware_trace),
+                )
 
         # ── Checkpoint preflight (only for tools that will execute) ──
         if block_result is None:
@@ -1158,6 +1216,17 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             if not guardrail_decision.allows_execution:
                 _guardrail_block_decision = guardrail_decision
 
+        # Mandatory cyberware governance gate — the bottom decision authority
+        # for EVERY tool call (inline-dispatched and registry-dispatched alike).
+        # A govd ``reject`` / fail-closed ``deny`` blocks execution here, reusing
+        # the plugin-block result path below. push_back is resolved to allow/deny
+        # inside the gate via the existing human-approval surface.
+        if _block_msg is None and _guardrail_block_decision is None:
+            _govern_block = _apply_govern_gate(agent, function_name, function_args)
+            if _govern_block is not None:
+                _block_msg = _govern_block
+                _block_error_type = "govern_block"
+
         _execution_blocked = _block_msg is not None or _guardrail_block_decision is not None
 
         if _execution_blocked:
@@ -1516,6 +1585,9 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,
                     skip_pre_tool_call_hook=True,
                     skip_tool_request_middleware=True,
+                    # Executor already ran the mandatory govern gate for this
+                    # tool_call; don't double-claim in the dispatcher.
+                    skip_govern_gate=True,
                     enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                     disabled_toolsets=getattr(agent, "disabled_toolsets", None),
                     tool_request_middleware_trace=list(middleware_trace),
@@ -1558,6 +1630,9 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,
                     skip_pre_tool_call_hook=True,
                     skip_tool_request_middleware=True,
+                    # Executor already ran the mandatory govern gate for this
+                    # tool_call; don't double-claim in the dispatcher.
+                    skip_govern_gate=True,
                     enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                     disabled_toolsets=getattr(agent, "disabled_toolsets", None),
                     tool_request_middleware_trace=list(middleware_trace),
