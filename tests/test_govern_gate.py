@@ -7,7 +7,10 @@ without a live node.
 """
 
 import importlib
+import io
+import json
 import os
+import urllib.error
 
 import pytest
 
@@ -134,6 +137,92 @@ def test_push_back_denied_by_human(monkeypatch):
     v = gg.govern_tool_call("write_file", {"path": "x"})
     assert v.allowed is False
     assert "denied" in v.reason
+
+
+# --------------------------------------------------------------------------- #
+# Transport: govd signals verdicts with non-2xx
+# --------------------------------------------------------------------------- #
+#
+# REGRESSION. The tests above monkeypatch ``_govern``, so they exercise decision
+# dispatch over a transport that always returns 200. The live node does not: it
+# answers 403 for ``reject`` and 409 for ``push_back``, and ``urlopen`` raises on
+# both. That turned every destructive claim into a generic ``govd HTTP <code>``
+# fail-closed deny and left ``_resolve_push_back`` unreachable -- covered by the
+# 200-mocks above, dead in production. These tests drive the real ``urlopen``
+# boundary so the mock can never diverge from the node again.
+
+def _raise_http(code: str, payload: dict):
+    """Patch urlopen to raise a real HTTPError carrying ``payload`` as its body."""
+    def _fake(req, timeout=None):
+        raise urllib.error.HTTPError(
+            "http://node/govern", code, "verdict", {},
+            io.BytesIO(json.dumps(payload).encode("utf-8")),
+        )
+    return _fake
+
+
+@pytest.mark.parametrize("code,decision", [(403, "reject"), (409, "push_back")])
+def test_http_json_returns_verdict_on_non_2xx(monkeypatch, code, decision):
+    monkeypatch.setattr(gg.urllib.request, "urlopen",
+                        _raise_http(code, {"decision": decision, "problems": []}))
+    status, body = gg._http_json("POST", "/govern", {"skill": "s"}, with_auth=False)
+    assert status == code
+    assert body["decision"] == decision
+
+
+def test_http_json_propagates_auth_failure(monkeypatch):
+    # 401 carries no ``decision`` -- a transport/auth failure, NOT a verdict. It
+    # must keep raising so the caller stays on the fail-closed path.
+    monkeypatch.setattr(gg.urllib.request, "urlopen",
+                        _raise_http(401, {"error": "missing/invalid Authorization: Bearer token"}))
+    with pytest.raises(urllib.error.HTTPError):
+        gg._http_json("POST", "/govern", {"skill": "s"}, with_auth=False)
+
+
+def test_real_409_reaches_the_human_approval_gate(monkeypatch):
+    """End-to-end: a genuine 409 must resolve as push_back, not a blanket deny."""
+    _verified(monkeypatch)
+    seen = {"asked": False}
+
+    def _urlopen(req, timeout=None):
+        # First claim -> 409 push_back. The approve-confirm re-POST -> 200 allow.
+        if seen["asked"]:
+            body = json.dumps({"decision": "allow", "run_id": "r9", "plan_sha": "p9"}).encode()
+            resp = io.BytesIO(body)
+            resp.status = 200
+            resp.__enter__ = lambda s=resp: s
+            resp.__exit__ = lambda s, *a: False
+            return resp
+        raise urllib.error.HTTPError(
+            "http://node/govern", 409, "push_back", {},
+            io.BytesIO(json.dumps({"decision": "push_back", "needs_approve": ["exec"]}).encode()),
+        )
+
+    monkeypatch.setattr(gg.urllib.request, "urlopen", _urlopen)
+
+    import tools.approval as approval
+
+    def _approve(*a, **k):
+        seen["asked"] = True
+        return {"approved": True, "message": None}
+
+    monkeypatch.setattr(approval, "request_tool_approval", _approve)
+
+    v = gg.govern_tool_call("terminal", {"command": "echo hi"})
+    assert seen["asked"] is True, "409 never reached the human approval gate"
+    assert v.allowed is True
+    assert v.run_id == "r9"
+
+
+def test_real_403_surfaces_problems_not_a_bare_status(monkeypatch):
+    _verified(monkeypatch)
+    monkeypatch.setattr(gg.urllib.request, "urlopen",
+                        _raise_http(403, {"decision": "reject",
+                                          "problems": [{"code": "plaintext_secret_key"}]}))
+    v = gg.govern_tool_call("write_file", {"path": "x"})
+    assert v.allowed is False
+    assert "plaintext_secret_key" in v.block_message()
+    assert "HTTP 403" not in v.reason
 
 
 # --------------------------------------------------------------------------- #

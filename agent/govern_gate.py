@@ -321,12 +321,29 @@ def _http_json(method: str, path: str, body: Optional[dict], *, with_auth: bool)
         tok = _token()
         if tok:
             req.add_header("Authorization", f"Bearer {tok}")
-    with urllib.request.urlopen(req, timeout=_timeout()) as resp:  # noqa: S310 (fixed scheme)
-        payload = resp.read().decode("utf-8")
+    try:
+        with urllib.request.urlopen(req, timeout=_timeout()) as resp:  # noqa: S310 (fixed scheme)
+            payload = resp.read().decode("utf-8")
+            try:
+                return resp.status, json.loads(payload)
+            except json.JSONDecodeError:
+                return resp.status, {"raw": payload}
+    except urllib.error.HTTPError as e:
+        # govd returns VERDICTS on non-2xx: 403 = reject, 409 = push_back. Those
+        # are decisions, not transport failures, and urlopen raises on both. Left
+        # unhandled, every reject/push_back collapsed into a generic
+        # ``govd HTTP <code>`` fail-closed deny -- which made the entire decision
+        # dispatch in ``govern_tool_call`` unreachable, including the human
+        # approval gate for destructive perks. Discriminate on the BODY, not the
+        # status code: a verdict carries ``decision``; an auth/transport failure
+        # (401, 5xx) does not, and must keep propagating to the fail-closed path.
         try:
-            return resp.status, json.loads(payload)
-        except json.JSONDecodeError:
-            return resp.status, {"raw": payload}
+            parsed = json.loads(e.read().decode("utf-8"))
+        except Exception:
+            raise
+        if isinstance(parsed, dict) and "decision" in parsed:
+            return e.code, parsed
+        raise
 
 
 def _skill_is_verified() -> tuple[bool, str]:
