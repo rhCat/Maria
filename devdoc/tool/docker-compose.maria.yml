@@ -1,0 +1,240 @@
+# docker-compose.maria.yml — contained Maria deployment
+#
+# Lives in devdoc/tool/ so the deployment config is VERSION CONTROLLED (it was untracked for a long time,
+# which meant every edit to the cage, the secrets wiring and the governance env was invisible to git).
+# Build contexts resolve relative to THIS FILE, hence the ../.. — the build context is still the repo root.
+# Run it from anywhere with:  docker compose -f devdoc/tool/docker-compose.maria.yml …
+#
+# Containment contract (differs deliberately from the upstream docker-compose.yml):
+#
+#   * NO host bind mounts. Upstream mounts ~/.hermes:/opt/data; here /opt/data is
+#     a docker-managed named volume and the only other writable surface is the
+#     disposable log volume. No host directory is visible to any container.
+#   * NO host networking. Upstream uses network_mode: host, which dissolves
+#     network containment. Maria sits on an `internal: true` network.
+#   * NO docker socket. docker/stage2-hook.sh probes for /var/run/docker.sock;
+#     leaving it unmounted keeps that path dead. Dockerfile.maria also drops
+#     docker-cli from the image entirely.
+#
+# THE CAGE. Docker has no native per-destination egress filter, and Docker
+# Desktop exposes no DOCKER-USER iptables hook, so egress is enforced
+# STRUCTURALLY: `cage` is an internal network with no route off the host, and
+# Maria is attached to nothing else. Two cage-side services are the only things
+# it can reach — its governance node, and the inference proxy:
+#
+#     maria ──cage──> maria-govd  (govern verdicts + the ledger; delegated+exod)
+#           └─cage──> llm-proxy ──uplink──> local LLM (inference, tailscale)
+#
+# maria-govd sits on the cage AND the uplink, but the agent only ever holds a
+# claim credential for it — the gate POSTs value-free claims and reads verdicts,
+# never egress. Maria therefore cannot reach the internet, the LAN, the tailnet,
+# the host, or any sibling container, and cannot name its upstreams — it knows
+# only `maria-govd` and `llm-proxy`. Verified by scripts/verify-maria-cage.sh.
+#
+# CENTRAL vs PER-AGENT GOVERNANCE. `maria-govd` here is a PER-AGENT node: it
+# serves the local skillChip (the only chip carrying hermes:toolgate) and keeps
+# its own ledger. The fleet's intended shape is that agents/subagents govern
+# against a CENTRAL govd so tool-use lands in ONE audit trail — this node is a
+# per-agent stand-in only because the mac node's served chip (skillchipMO) does
+# not yet carry hermes:toolgate. To centralize: serve a chip that includes the
+# gate skill on the mac node, then point HERMES_GOVERN_URL at it (over the
+# uplink) and retire this per-agent node. Nothing about the cage changes.
+#
+# SECRETS. Three, none of them mounted and none baked into an image:
+#
+#   MARIA_GOVD_TOKEN   govd principal credential (legacy static bearer)
+#   MARIA_ED25519_KEY  the agent's ed25519 key, 64 hex chars — the issuer-free identity scheme. Its PUBLIC
+#                      half is declared as `subject` on the node's principal; the private half never leaves
+#                      this tmpfs. Mint with:  openssl rand -hex 32
+#   LOCAL_LLM_TOKEN    upstream inference token
+#   LITELLM_MASTER_KEY the key Maria uses to talk to llm-proxy. Generate a
+#                      fresh one; it is deliberately NOT the upstream token, so
+#                      the cage never holds the real inference credential.
+#                      MUST begin with "sk-" — litellm only treats a key as the
+#                      master key if it carries that prefix, and otherwise falls
+#                      through to a virtual-key DB lookup that fails with the
+#                      thoroughly unhelpful "HTTP 400: No connected db."
+#                      e.g.  LITELLM_MASTER_KEY=sk-$(openssl rand -hex 24)
+#
+# Launch:
+#   MARIA_GOVD_TOKEN=$(cat /Volumes/prod/cyberware/maria/etc/monitor.token) \
+#   LOCAL_LLM_TOKEN=$(cat /Volumes/prod/hunyuan/localllmtk/laguna-s-2-1-nvfp4.token) \
+#   LITELLM_MASTER_KEY=$(openssl rand -hex 32) \
+#     docker compose -f docker-compose.maria.yml up -d
+
+name: maria
+
+networks:
+  # Maria's only network. `internal: true` means docker installs no route off
+  # the host for it: no internet, no LAN, no tailnet, no host services.
+  cage:
+    internal: true
+  # The proxies' outward leg. Maria is never attached to this.
+  uplink: {}
+
+volumes:
+  # Agent state (HERMES_HOME). Docker-managed, no host path. Survives restarts
+  # so auth/sessions/cron persist; disposable via `docker volume rm`.
+  maria_state:
+  # The disposable output-log volume.
+  maria_logs:
+  # govd record root -- the run ledger.
+  maria_govd_data:
+
+services:
+  # NOTE: an earlier `govd-proxy` (a socat hop from the cage to the mac node's
+  # 5773) was removed. Maria governs directly against `maria-govd` on the cage,
+  # so the proxy forwarded zero connections. The governance path is now
+  #     maria ──cage──> maria-govd  (verdicts + ledger, one hop, no proxy)
+  # If this deployment is ever repointed at a CENTRAL govd instead of a
+  # per-agent one, the agent governs that node directly over the uplink — a
+  # proxy is not what makes governance central; the shared node + shared ledger
+  # is. See the header note on central-vs-per-agent governance.
+
+  # ---- Maria's governance node ---------------------------------------------
+  # The gate is fail-closed and useless without a govd that serves a VERIFIED
+  # hermes:toolgate. The published magnumopus chip does not carry it; the local
+  # skillChip does (`skill_index --check` -> "[ok] hermes:toolgate ... all
+  # authentic"), so this node serves THAT chip.
+  #
+  # The image CMD is `chipfetch --exec body-entrypoint.sh`, which clones
+  # CLOUD_SOURCE over the network. We bypass chipfetch and exec the entrypoint
+  # directly, with CYBERWARE_SKILLCHIP pointing at the mounted chip —
+  # infra/registry.py:20 reads exactly that env var.
+  #
+  # This container mounts a host path. That is deliberate and does NOT breach
+  # the contract: the contract cages MARIA. govd is the thing Maria is caged
+  # AGAINST, and it needs the chip on disk to serve it read-only.
+  maria-govd:
+    image: ghcr.io/rhcat/cyberware-body:latest
+    container_name: maria-govd
+    restart: unless-stopped
+    networks: [cage, uplink]
+    volumes:
+      - ${SKILLCHIP_DIR:-/Volumes/prod/hunyuan/cyberware/skillChip}:/chip:ro
+      - maria_govd_data:/data
+    environment:
+      CYBERWARE_SKILLCHIP: /chip
+      GOVD_PORT: "5773"
+      GOVD_RECORD_ROOT: /data/body      # <- the LEDGER lives here
+      # Identity scheme for Authorization: Bearer. MUST be env, not govd.json: the body entrypoint
+      # REGENERATES /data/body/etc/govd.json on every boot, so a value written into that file is wiped on
+      # the next recreate. govd reads env first, so this survives. "" / "token_sha" = the built-in
+      # bearer-secret path; "ed25519" verifies the short-lived assertions Maria mints.
+      GOVD_AUTH_VERIFIER: "ed25519"
+      FLEETD_NODE_ID: maria-dev-mac
+    command: ["/usr/local/bin/body-entrypoint.sh"]
+    # Published so the fleet monitor can poll it; 5773 on the tailnet IP is
+    # already taken by the mac node, hence 5774. This is INBOUND only and gives
+    # the cage no egress.
+    ports:
+      - "${GOVD_BIND:-100.101.222.80}:5774:5773"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:5773/health',timeout=5)"]
+      interval: 30s
+      timeout: 8s
+      retries: 5
+      start_period: 30s
+
+  # ---- hole 2: inference ----------------------------------------------------
+  # LiteLLM terminates Maria's OpenAI-compatible calls and re-issues them to the
+  # local model over tailscale. Config is baked (docker/litellm/), so no mount.
+  llm-proxy:
+    build:
+      context: ../../docker/litellm
+    image: maria-llm-proxy
+    container_name: maria-llm-proxy
+    restart: unless-stopped
+    networks: [cage, uplink]
+    environment:
+      LOCAL_LLM_BASE: ${LOCAL_LLM_BASE:-http://100.74.54.74:8081/v1}
+      LOCAL_LLM_TOKEN: ${LOCAL_LLM_TOKEN:?set LOCAL_LLM_TOKEN (see header)}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY (see header)}
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness',timeout=5)"]
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 40s
+
+  # ---- the caged agent ------------------------------------------------------
+  maria:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.maria
+    image: maria
+    container_name: maria
+    restart: unless-stopped
+    depends_on:
+      maria-govd: {condition: service_healthy}
+      llm-proxy: {condition: service_healthy}
+    networks: [cage]
+    volumes:
+      - maria_state:/opt/data
+      - maria_logs:/opt/logs
+    # The govd token lands here, on tmpfs — never on disk, never from a mount.
+    tmpfs:
+      - /run/maria:mode=0700,uid=10000,gid=10000
+    environment:
+      HERMES_UID: "10000"
+      HERMES_GID: "10000"
+      # --- inference: the caged endpoint, not the real one ------------------
+      # CUSTOM_*, not OPENAI_*: hermes_cli/runtime_provider.py states plainly
+      # that "OPENAI_BASE_URL env var is no longer consulted -- config.yaml is
+      # the single source of truth for endpoint URLs". CUSTOM_BASE_URL is still
+      # read from the environment and takes precedence over config, so it is
+      # the only env-only way to pin the endpoint without seeding config.yaml
+      # on the state volume.
+      CUSTOM_BASE_URL: "http://llm-proxy:4000/v1"
+      CUSTOM_API_KEY: ${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY (see header)}
+      # --- cyberware governance gate ----------------------------------------
+      # These three are frozen at import by agent/govern_gate.py (H1) and are
+      # read from the ENVIRONMENT ONLY — there is deliberately no config.yaml
+      # fallback, so a write_file to config.yaml cannot disable the gate that
+      # governs that write. Upstream a root-owned systemd unit injects them from
+      # /etc/maria/governance.conf; here compose is that injector, and the
+      # container's environment is not agent-writable.
+      HERMES_GOVERN_ENABLED: "true"
+      HERMES_GOVERN_FAIL_OPEN: "false"
+      HERMES_GOVERN_URL: "http://maria-govd:5773"
+      HERMES_GOVERN_TOKEN_FILE: "/run/maria/govd.token"
+      # Identity SCHEME. "token" (default) sends the long-lived static bearer above; "ed25519" mints a
+      # FRESH short-lived assertion per claim from the key below, so nothing replayable crosses the wire and
+      # the node's signed chain records a NAMED principal instead of "whoever held the shared token".
+      # Frozen at import by agent/govern_gate.py, from the environment only — same H1 hardening as the three
+      # switches above, because which credential the agent holds is itself a security property.
+      HERMES_GOVERN_AUTH_SCHEME: "ed25519"
+      HERMES_GOVERN_KEY_FILE: "/run/maria/agent-ed25519.key"
+      # Consumed by the entrypoint and unset before exec, exactly like MARIA_GOVD_TOKEN. Same accepted cost:
+      # it stays visible in `docker inspect` — switch to a docker secret if that matters more.
+      MARIA_ED25519_KEY: ${MARIA_ED25519_KEY:?set MARIA_ED25519_KEY (see header)}
+      # Consumed by the entrypoint below and unset before exec. NOTE: it stays
+      # visible in `docker inspect`; that is the accepted cost of the no-mount
+      # requirement. Switch to a docker secret if that matters more.
+      MARIA_GOVD_TOKEN: ${MARIA_GOVD_TOKEN:?set MARIA_GOVD_TOKEN (see header)}
+    # /init must remain PID 1 — it runs s6's cont-init.d (chown, profile
+    # reconcile) and builds the supervision tree. `exec` below hands PID 1 to
+    # /init, so the documented invariant holds.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        umask 077
+        printf '%s' "$$MARIA_GOVD_TOKEN" > /run/maria/govd.token
+        chmod 600 /run/maria/govd.token
+        chown 10000:10000 /run/maria/govd.token
+        unset MARIA_GOVD_TOKEN
+        printf '%s' "$$MARIA_ED25519_KEY" > /run/maria/agent-ed25519.key
+        chmod 600 /run/maria/agent-ed25519.key
+        chown 10000:10000 /run/maria/agent-ed25519.key
+        unset MARIA_ED25519_KEY
+        exec /init /opt/hermes/docker/main-wrapper.sh "$$@"
+      - --
+    command: ["gateway", "run"]
+    security_opt: [no-new-privileges:true]
+    # NOTE: `cap_drop: [ALL]` is NOT set here. s6 stage2 runs usermod/groupmod
+    # and chowns $HERMES_HOME as root before dropping to uid 10000, so it needs
+    # CHOWN / SETUID / SETGID / DAC_OVERRIDE / FOWNER. Tighten only after
+    # confirming stage2 still completes — see docker/stage2-hook.sh.

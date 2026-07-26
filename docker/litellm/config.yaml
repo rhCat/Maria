@@ -1,0 +1,27 @@
+# LiteLLM proxy config for the contained Maria deployment.
+#
+# Baked into the image (see the Dockerfile beside this file) rather than
+# bind-mounted, because the containment contract forbids host mounts. Secrets
+# are NOT baked: both keys resolve from the environment at startup via
+# litellm's `os.environ/` indirection, so nothing sensitive lands in a layer.
+#
+# Upstream is the local inference host, reached over tailscale. Maria itself
+# never learns this address — it only ever sees http://llm-proxy:4000.
+
+model_list:
+  - model_name: laguna-s-2.1-nvfp4
+    litellm_params:
+      model: openai/laguna-s-2.1-nvfp4
+      api_base: os.environ/LOCAL_LLM_BASE
+      api_key: os.environ/LOCAL_LLM_TOKEN
+
+general_settings:
+  # Maria authenticates to the proxy with this; it is a different secret from
+  # the upstream token, so the cage never holds the real inference credential.
+  master_key: os.environ/LITELLM_MASTER_KEY
+
+litellm_settings:
+  # The local server is OpenAI-compatible but not OpenAI: silently drop params
+  # it does not implement rather than 400-ing the agent mid-run.
+  drop_params: true
+  request_timeout: 600
