@@ -262,3 +262,78 @@ def test_unknown_decision_fails_closed(monkeypatch):
                         lambda perk, keys, approve: (200, {"decision": "maybe"}))
     v = gg.govern_tool_call("read_file", {"path": "x"})
     assert v.allowed is False
+
+
+# ───────────────────────── ed25519 assertions (the issuer-free scheme) ─────────────────────────
+# The verifier lives in cyberware; this side only MINTS. These pin the wire format and the fail-closed
+# paths. Cross-repo byte-compatibility is verified by minting here and verifying with
+# infra/govern/ed25519_auth.py — done manually at build time; these keep the local half honest.
+
+def _mk_key(tmp_path, raw: bytes, name="k.key", hexform=False):
+    p = tmp_path / name
+    p.write_text(raw.hex() + "\n") if hexform else p.write_bytes(raw)
+    return str(p)
+
+
+def _reload_with(monkeypatch, **env):
+    for k, v in env.items():
+        monkeypatch.setenv(k, v) if v is not None else monkeypatch.delenv(k, raising=False)
+    importlib.reload(gg)
+    return gg
+
+
+def test_default_scheme_is_the_static_token(monkeypatch, tmp_path):
+    tok = tmp_path / "t"
+    tok.write_text("static-secret")
+    g = _reload_with(monkeypatch, HERMES_GOVERN_AUTH_SCHEME=None,
+                     HERMES_GOVERN_TOKEN_FILE=str(tok))
+    assert g._AUTH_SCHEME_FROZEN == "token"
+    assert g._bearer() == "static-secret"
+
+
+def test_ed25519_scheme_mints_a_fresh_assertion(monkeypatch, tmp_path):
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives import serialization
+    raw = Ed25519PrivateKey.generate().private_bytes(
+        serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
+    g = _reload_with(monkeypatch, HERMES_GOVERN_AUTH_SCHEME="ed25519",
+                     HERMES_GOVERN_KEY_FILE=_mk_key(tmp_path, raw))
+    a, b = g._bearer(), g._bearer()
+    assert a and b
+    assert a != b, "each claim must carry a FRESH assertion — a cached one is replayable"
+
+
+def test_raw_key_with_whitespace_edges_is_accepted(monkeypatch, tmp_path):
+    """REGRESSION. `fh.read().strip()` strips whitespace BYTES from a binary key: ~5% of random 32-byte
+    keys begin or end with 0x09/0x0a/0x0b/0x0c/0x0d/0x20 and were silently truncated to 31 bytes and
+    rejected — intermittently, and only for some keys. Caught by the first cross-repo mint."""
+    raw = bytes([0x20]) + bytes(range(1, 31)) + bytes([0x0a])
+    assert len(raw) == 32
+    g = _reload_with(monkeypatch, HERMES_GOVERN_AUTH_SCHEME="ed25519",
+                     HERMES_GOVERN_KEY_FILE=_mk_key(tmp_path, raw, "ws.key"))
+    assert g._bearer() is not None
+
+
+def test_hex_key_form_is_accepted(monkeypatch, tmp_path):
+    raw = bytes(range(32))
+    g = _reload_with(monkeypatch, HERMES_GOVERN_AUTH_SCHEME="ed25519",
+                     HERMES_GOVERN_KEY_FILE=_mk_key(tmp_path, raw, "h.key", hexform=True))
+    assert g._bearer() is not None
+
+
+@pytest.mark.parametrize("bad", [b"", b"short", bytes(31), bytes(33)])
+def test_malformed_key_mints_nothing(monkeypatch, tmp_path, bad):
+    g = _reload_with(monkeypatch, HERMES_GOVERN_AUTH_SCHEME="ed25519",
+                     HERMES_GOVERN_KEY_FILE=_mk_key(tmp_path, bad, "bad.key"))
+    assert g._bearer() is None, "a bad key must mint NOTHING — never a header, never an unauthenticated pass"
+
+
+def test_missing_key_file_mints_nothing(monkeypatch, tmp_path):
+    g = _reload_with(monkeypatch, HERMES_GOVERN_AUTH_SCHEME="ed25519",
+                     HERMES_GOVERN_KEY_FILE=str(tmp_path / "nope.key"))
+    assert g._bearer() is None
+
+
+def test_ed25519_scheme_without_a_key_file_mints_nothing(monkeypatch):
+    g = _reload_with(monkeypatch, HERMES_GOVERN_AUTH_SCHEME="ed25519", HERMES_GOVERN_KEY_FILE=None)
+    assert g._bearer() is None

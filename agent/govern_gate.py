@@ -176,6 +176,15 @@ def _env_flag(name: str, default: bool) -> bool:
 _ENABLED_FROZEN = _env_flag("HERMES_GOVERN_ENABLED", False)
 _FAIL_OPEN_FROZEN = _env_flag("HERMES_GOVERN_FAIL_OPEN", False)
 _URL_FROZEN = (os.environ.get("HERMES_GOVERN_URL") or "").rstrip("/")
+# The identity SCHEME this agent presents. Frozen at import from env only, like the three above: which
+# credential we hold is a security property, and a tool result that could flip it back to a long-lived
+# static secret would defeat the point of moving off one.
+#   "token"   (default) — the legacy static bearer read from HERMES_GOVERN_TOKEN_FILE. Unchanged.
+#   "ed25519" — mint a FRESH short-lived assertion per claim from a private key. Nothing long-lived on the
+#               wire, nothing replayable past its TTL, and the node's chain records a NAMED principal
+#               instead of "whoever held the shared token".
+_AUTH_SCHEME_FROZEN = (os.environ.get("HERMES_GOVERN_AUTH_SCHEME") or "token").strip().lower()
+_KEY_FILE_FROZEN = os.environ.get("HERMES_GOVERN_KEY_FILE") or ""
 
 
 def _config() -> dict:
@@ -217,6 +226,92 @@ def _token() -> Optional[str]:
     except OSError as e:
         logger.warning("govern_gate: cannot read token file %s (%s)", path, e)
         return None
+
+
+# --- Ed25519 assertions (the issuer-free identity scheme) --------------------
+#
+# VENDORED, not imported. The verifier lives in cyberware (infra/govern/ed25519_auth.py); this is only the
+# ~30 lines of MINTING it needs. Importing the package would drag infra.* into the cage and hand the agent
+# code it must never have — the same reasoning that keeps the cooperative run path out of here.
+#
+# The wire format is DSSE, byte-compatible with infra/cwp/sign.py:
+#   payload      = base64(canonical-json(body))          # JCS: sorted keys, tight separators
+#   signature    = Ed25519 over PAE("DSSEv1 " ‖ type ‖ payload)
+#   the envelope = base64url(json(envelope))             # so it fits an Authorization header
+# The body is deliberately ALL ASCII strings and ints, which is exactly the subset where json.dumps with
+# sorted keys and tight separators is identical to cyberware's canonicalize(). Keep it that way: adding a
+# float or a non-ASCII string here would silently diverge and every signature would fail to verify.
+
+_ASSERTION_TYPE = "application/cwp-auth+json"
+_ASSERTION_TTL = 300
+
+
+def _pae(payload_type: str, payload: bytes) -> bytes:
+    pt = payload_type.encode()
+    return (b"DSSEv1 " + str(len(pt)).encode() + b" " + pt + b" "
+            + str(len(payload)).encode() + b" " + payload)
+
+
+def _mint_assertion() -> Optional[str]:
+    """A fresh short-lived assertion for this agent's key, or None if it cannot be minted.
+
+    Returns None (never raises) on a missing/unreadable/malformed key — the caller then sends no
+    Authorization header at all, govd answers 401, and the gate fails closed. A minting failure must never
+    degrade into 'proceed unauthenticated'.
+    """
+    path = os.path.expanduser(_KEY_FILE_FROZEN)
+    if not path:
+        logger.warning("govern_gate: auth_scheme=ed25519 but HERMES_GOVERN_KEY_FILE is unset")
+        return None
+    try:
+        import base64
+        import secrets
+        import time as _time
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+        with open(path, "rb") as fh:
+            data = fh.read()
+        # Two accepted forms. HEX is preferred for a key file: it survives editors, copy-paste and trailing
+        # newlines, and is inspectable. RAW is accepted for keys written by tooling.
+        #
+        # NEVER .strip() the raw form. A key is 32 random bytes, so ~5% of keys begin or end with a byte
+        # that happens to be ASCII whitespace (0x09/0x0a/0x0b/0x0c/0x0d/0x20); stripping silently truncates
+        # those to 31 bytes and the credential is rejected — intermittently, and only for some keys. This
+        # was a real bug caught by the first cross-repo mint.
+        txt = data.strip()
+        if len(txt) == 64 and all(c in b"0123456789abcdefABCDEF" for c in txt):
+            raw = bytes.fromhex(txt.decode())
+        elif len(data) == 32:
+            raw = data
+        else:
+            logger.warning("govern_gate: key file %s is neither 64 hex chars nor 32 raw bytes", path)
+            return None
+        key = Ed25519PrivateKey.from_private_bytes(raw)
+        pub = key.public_key().public_bytes(serialization.Encoding.Raw,
+                                            serialization.PublicFormat.Raw)
+        now = int(_time.time())
+        body = {"exp": now + _ASSERTION_TTL, "iat": now,
+                "nonce": secrets.token_urlsafe(12), "pub": pub.hex()}
+        payload = json.dumps(body, sort_keys=True, separators=(",", ":"),
+                             ensure_ascii=False).encode("utf-8")
+        sig = key.sign(_pae(_ASSERTION_TYPE, payload))
+        kid = "ed25519:" + hashlib.sha256(pub).hexdigest()[:16]
+        env = {"payload": base64.b64encode(payload).decode(),
+               "payloadType": _ASSERTION_TYPE,
+               "signatures": [{"keyid": kid, "sig": base64.b64encode(sig).decode()}]}
+        blob = json.dumps(env, separators=(",", ":"), sort_keys=True).encode()
+        return base64.urlsafe_b64encode(blob).decode().rstrip("=")
+    except Exception as e:
+        logger.warning("govern_gate: could not mint an ed25519 assertion (%s)", e)
+        return None
+
+
+def _bearer() -> Optional[str]:
+    """The credential for THIS request. One place, so the scheme cannot diverge between call sites."""
+    if _AUTH_SCHEME_FROZEN == "ed25519":
+        return _mint_assertion()                             # fresh per claim; never cached
+    return _token()
 
 
 def _timeout() -> float:
@@ -318,8 +413,8 @@ def _http_json(method: str, path: str, body: Optional[dict], *, with_auth: bool)
     if data is not None:
         req.add_header("Content-Type", "application/json")
     if with_auth:
-        tok = _token()
-        if tok:
+        tok = _bearer()                                      # scheme-dispatched: static token, or a freshly
+        if tok:                                              # minted ed25519 assertion (never cached)
             req.add_header("Authorization", f"Bearer {tok}")
     try:
         with urllib.request.urlopen(req, timeout=_timeout()) as resp:  # noqa: S310 (fixed scheme)
