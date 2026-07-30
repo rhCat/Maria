@@ -93,28 +93,35 @@ services:
 
   # ---- Maria's governance node ---------------------------------------------
   # The gate is fail-closed and useless without a govd that serves a VERIFIED
-  # hermes:toolgate. The published magnumopus chip does not carry it; the local
-  # skillChip does (`skill_index --check` -> "[ok] hermes:toolgate ... all
-  # authentic"), so this node serves THAT chip.
+  # hermes:toolgate. The lean `core` channel does not carry it, and `main` carries
+  # 227 skills — far too wide a surface to hand a caged agent. `core/maria` is the
+  # 44-skill composite that fits: core/backbone + hermes:toolgate, re-pinned
+  # (chip_sha c533b814…, `skill_index --check` -> "chip manifest — chip authentic").
   #
-  # The image CMD is `chipfetch --exec body-entrypoint.sh`, which clones
-  # CLOUD_SOURCE over the network. We bypass chipfetch and exec the entrypoint
-  # directly, with CYBERWARE_SKILLCHIP pointing at the mounted chip —
-  # infra/registry.py:20 reads exactly that env var.
+  # The chip is CLONED AT BOOT, not mounted. skillChip is public, so no
+  # CLOUD_SOURCE_TOKEN is needed, and the ref is pinned to a COMMIT SHA — a branch
+  # name would move under the node. chipfetch re-validates the clone before govd
+  # starts and refuses on drift; provenance (mode · source · ref · commit ·
+  # chip_sha) is surfaced at /health.
   #
-  # This container mounts a host path. That is deliberate and does NOT breach
-  # the contract: the contract cages MARIA. govd is the thing Maria is caged
-  # AGAINST, and it needs the chip on disk to serve it read-only.
+  # Do NOT re-add a `command:` override. The image CMD is
+  # `chipfetch --exec body-entrypoint.sh`; overriding it skips acquire+validate
+  # altogether. This deployment did exactly that until 2026-07-30, because no
+  # published ref carried hermes:toolgate and the chip had to come off a host
+  # mount — a tree that existed in no git history. It does now; that is the fix.
   maria-govd:
     image: ghcr.io/rhcat/cyberware-body:latest
     container_name: maria-govd
     restart: unless-stopped
     networks: [cage, uplink]
     volumes:
-      - ${SKILLCHIP_DIR:-/Volumes/prod/hunyuan/cyberware/skillChip}:/chip:ro
       - maria_govd_data:/data
     environment:
-      CYBERWARE_SKILLCHIP: /chip
+      CLOUD_MODE: "1"
+      CLOUD_SOURCE: https://github.com/rhCat/skillChip.git
+      # Pinned sha on core/maria. Bump deliberately. chipfetch full-clones and
+      # checks out when --branch fails, which is how a raw sha resolves.
+      CLOUD_SOURCE_TAG: 1cde76d0a575e0976f61977d4d8ce15e5e4d2d54
       GOVD_PORT: "5773"
       GOVD_RECORD_ROOT: /data/body      # <- the LEDGER lives here
       # Identity scheme for Authorization: Bearer. MUST be env, not govd.json: the body entrypoint
@@ -123,7 +130,7 @@ services:
       # bearer-secret path; "ed25519" verifies the short-lived assertions Maria mints.
       GOVD_AUTH_VERIFIER: "ed25519"
       FLEETD_NODE_ID: maria-dev-mac
-    command: ["/usr/local/bin/body-entrypoint.sh"]
+    # No `command:` — the image CMD (chipfetch --exec body-entrypoint.sh) runs.
     # Published so the fleet monitor can poll it; 5773 on the tailnet IP is
     # already taken by the mac node, hence 5774. This is INBOUND only and gives
     # the cage no egress.
