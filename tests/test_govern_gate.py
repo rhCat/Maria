@@ -71,12 +71,40 @@ def test_coarse_target_never_leaks_full_path():
 # Enable / disable
 # --------------------------------------------------------------------------- #
 
+@pytest.mark.skipif(
+    gg._marker_present(),
+    reason="H4: the root-owned governed marker is present, so the gate cannot be "
+           "switched off by environment here — that is the point of the marker. "
+           "This assertion only describes an unmarked host (dev checkout, CI).",
+)
 def test_disabled_allows_everything(monkeypatch):
     monkeypatch.setenv("HERMES_GOVERN_ENABLED", "0")
     importlib.reload(gg)
     v = gg.govern_tool_call("terminal", {"command": "rm -rf /"})
     assert v.allowed is True
     assert "disabled" in v.reason
+
+
+def test_marker_predicate_rejects_a_forgeable_marker(tmp_path, monkeypatch):
+    """H4: only a root-owned, non-group/other-writable marker counts.
+
+    A marker the agent could create or rewrite would not be an authority it is
+    unable to forge, so a file owned by the calling user must not qualify. The
+    predicate reads the path at call time, so pointing it elsewhere is enough
+    to exercise it without touching the real /etc.
+
+    That the marker actually WINS over the environment is proved end-to-end in
+    the container (a child process with the switch cleared still reports the
+    gate enabled); it cannot be asserted here, because the constants derive at
+    import and importlib.reload re-runs the real predicate.
+    """
+    forgeable = tmp_path / "governed"
+    forgeable.write_text("x")
+    monkeypatch.setattr(gg, "_GOVERNED_MARKER", str(forgeable))
+    assert gg._marker_present() is False, "a user-owned marker must not count"
+
+    monkeypatch.setattr(gg, "_GOVERNED_MARKER", str(tmp_path / "absent"))
+    assert gg._marker_present() is False, "a missing marker must not count"
 
 
 # --------------------------------------------------------------------------- #

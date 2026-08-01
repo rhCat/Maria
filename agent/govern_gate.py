@@ -125,7 +125,11 @@ _SELFMOD_CAPABLE_TOOLS = frozenset({"write_file", "patch", "terminal", "execute_
 
 
 def _protected_config_basenames() -> set[str]:
-    names = {"governance.conf"}
+    # os.path.basename(_GOVERNED_MARKER): unlinking the marker would drop the
+    # deployment back to env-decided authority (H4). Filesystem permissions are
+    # the real guarantee — the agent account cannot unlink under /etc — but a
+    # claim that names it should still be classified as touching the gate.
+    names = {"governance.conf", os.path.basename(_GOVERNED_MARKER)}
     for var in ("HERMES_GOVERN_CONFIG", "HERMES_GOVERN_TOKEN_FILE"):
         p = os.environ.get(var)
         if p:
@@ -173,8 +177,45 @@ def _env_flag(name: str, default: bool) -> bool:
 # Non-security values (``token_file`` path, ``timeout``) MAY still come from
 # config: the token file itself is root-owned ``chmod 600`` (its path is not a
 # bypass surface), and timeout only affects latency/DoS-window, not authority.
-_ENABLED_FROZEN = _env_flag("HERMES_GOVERN_ENABLED", False)
-_FAIL_OPEN_FROZEN = _env_flag("HERMES_GOVERN_FAIL_OPEN", False)
+# --- H4: the governed marker ------------------------------------------------
+#
+# H1 moved authority off the agent-writable config and onto the environment.
+# That is necessary but not sufficient: the environment is not an enforcement
+# boundary, because *every process controls its own*. A shell tool call that
+# earns a single ``allow`` verdict can start a fresh interpreter with the
+# switch cleared, and the child comes up ungoverned — the gate governs the
+# first command and nothing after it. Unsetting works as well as clearing,
+# since the env default is off.
+#
+# The marker closes that by moving authority somewhere the agent cannot write.
+# It is a fixed path under /etc — NOT env-derived, or the same child could
+# simply point it elsewhere — owned by root and not group/other writable, in a
+# directory the unprivileged agent account cannot create or unlink entries in.
+#
+# When present, the marker WINS over the environment: governed, fail-closed,
+# regardless of what any descendant sets. Forging it is harmless by
+# construction — creating one can only turn governance ON.
+#
+# Absent (a developer checkout, CI, a plain CLI run), behaviour is unchanged:
+# the environment decides, defaulting off. The marker is what an image ships
+# to say "this deployment is governed and that is not negotiable".
+_GOVERNED_MARKER = "/etc/maria/governed"
+
+
+def _marker_present() -> bool:
+    """True if the root-owned governed marker is in place."""
+    try:
+        st = os.stat(_GOVERNED_MARKER)
+    except OSError:
+        return False
+    # Root-owned and not writable by group/other. A marker the agent could
+    # rewrite would not be an authority the agent is unable to forge.
+    return st.st_uid == 0 and not (st.st_mode & 0o022)
+
+
+_MARKER_FROZEN = _marker_present()
+_ENABLED_FROZEN = True if _MARKER_FROZEN else _env_flag("HERMES_GOVERN_ENABLED", False)
+_FAIL_OPEN_FROZEN = False if _MARKER_FROZEN else _env_flag("HERMES_GOVERN_FAIL_OPEN", False)
 _URL_FROZEN = (os.environ.get("HERMES_GOVERN_URL") or "").rstrip("/")
 # The identity SCHEME this agent presents. Frozen at import from env only, like the three above: which
 # credential we hold is a security property, and a tool result that could flip it back to a long-lived
@@ -199,12 +240,16 @@ def _config() -> dict:
 
 
 def is_enabled() -> bool:
-    """Whether the mandatory gate is active. Frozen at import from env only."""
+    """Whether the mandatory gate is active. Frozen at import. The root-owned
+    marker (H4) forces True when present; otherwise the environment decides
+    and defaults off."""
     return _ENABLED_FROZEN
 
 
 def _fail_open() -> bool:
-    """Fail-open posture. Frozen at import from env only; default fail-closed."""
+    """Fail-open posture. Frozen at import; default fail-closed. The marker
+    (H4) forces fail-closed when present, so a governed deployment cannot be
+    talked into treating an unreachable govd as permission."""
     return _FAIL_OPEN_FROZEN
 
 

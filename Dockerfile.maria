@@ -169,6 +169,19 @@ COPY --chmod=0755 docker/cont-init.d/02-reconcile-profiles /etc/cont-init.d/02-r
 # deployment's own environment, so no site's topology lands in this file.
 ENV HERMES_GOVERN_ENABLED=true
 ENV HERMES_GOVERN_FAIL_OPEN=false
+
+# H4: the governed marker. The ENV lines above are a DEFAULT, not a boundary —
+# any descendant can clear its own environment. This file is the boundary:
+# root-owned, mode 0644, inside a 0755 root-owned directory, so the
+# unprivileged agent account (uid 10000) can neither rewrite nor unlink it.
+# agent/govern_gate.py reads it at import and lets it WIN over the
+# environment, so a child cannot start itself ungoverned.
+RUN mkdir -p /etc/maria && \
+    printf '%s\n' 'This deployment is governed. See agent/govern_gate.py (H4).' \
+        > /etc/maria/governed && \
+    chown -R root:root /etc/maria && \
+    chmod 0755 /etc/maria && \
+    chmod 0644 /etc/maria/governed
 ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
 ENV HERMES_TUI_DIR=/opt/hermes/ui-tui
 ENV HERMES_HOME=/opt/data
