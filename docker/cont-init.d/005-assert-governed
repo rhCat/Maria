@@ -1,0 +1,72 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Refuse to boot ungoverned.
+#
+# The invariant: an agent in THIS image always goes through govd. Not
+# "usually", not "when the compose file remembers to say so" — always.
+#
+# Why this file exists at all. ``agent/govern_gate.py`` reads its security
+# switches ONCE at import, from the process environment only (H1), and
+# defaults to disabled. Dockerfile.maria bakes the enabled value into the
+# image so that absence of configuration means GOVERNED rather than the
+# reverse.
+#
+# That leaves run-time overrides. Because the switches are frozen at
+# import, an override takes effect before any code path could warn about
+# it — the container would simply come up in a weaker posture with no
+# signal at all. This script runs at boot and emits that signal.
+#
+# SCOPE — this is DETECTION, not yet ENFORCEMENT.
+#
+# s6-overlay's S6_BEHAVIOUR_IF_STAGE2_FAILS defaults to 0 ("continue
+# silently"), so a non-zero exit from a cont-init.d script is logged and
+# the boot proceeds. Setting it to 2 makes stage2 failures fatal and turns
+# this script into real enforcement, at the cost of making EVERY
+# cont-init failure fatal — a trade to weigh separately. Until then, the
+# FATAL lines below are the signal this emits, and operators should treat
+# them as a boot failure even though the runtime does not.
+#
+# Runs at 005 — before 01-hermes-setup — so we refuse before the image
+# does any setup work on behalf of an agent that must not run.
+
+set -eu
+
+# Mirror _env_flag() in agent/govern_gate.py EXACTLY. If these two ever
+# disagree, this assertion passes while the gate stays off — which is the
+# one failure mode that would make this file worse than useless.
+# NOTE: strip LEADING/TRAILING whitespace only, like Python's str.strip().
+# Deleting all whitespace instead would make " tr ue " truthy here and False
+# in the gate — the assertion would pass over a disabled gate.
+_truthy() {
+    case "$(printf '%s' "${1:-}" \
+            | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+            | tr '[:upper:]' '[:lower:]')" in
+        1|true|yes|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if ! _truthy "${HERMES_GOVERN_ENABLED:-}"; then
+    echo "[assert-governed] FATAL: HERMES_GOVERN_ENABLED=${HERMES_GOVERN_ENABLED:-<unset>}" >&2
+    echo "[assert-governed] This image does not run an ungoverned agent." >&2
+    echo "[assert-governed] The image bakes HERMES_GOVERN_ENABLED=true; something" >&2
+    echo "[assert-governed] overrode it (docker run -e, compose environment:, or a" >&2
+    echo "[assert-governed] modified image). Restore it, or use a different image." >&2
+    exit 1
+fi
+
+# Fail-open turns every govd outage into a silent full-permission window.
+# Enabled+fail_open is strictly weaker than the posture we are asserting,
+# so refuse it here rather than discover it during an outage.
+if _truthy "${HERMES_GOVERN_FAIL_OPEN:-}"; then
+    echo "[assert-governed] FATAL: HERMES_GOVERN_FAIL_OPEN is set." >&2
+    echo "[assert-governed] Fail-open means an unreachable govd silently allows" >&2
+    echo "[assert-governed] every tool call. Not in this image." >&2
+    exit 1
+fi
+
+# URL is not asserted: govern_gate falls back to http://127.0.0.1:5773,
+# which is the correct default for the sidecar topology. A wrong-but-set
+# URL is a reachability problem, and the gate is fail-closed, so it
+# denies rather than leaks.
+echo "[assert-governed] gate ON, fail-closed → ${HERMES_GOVERN_URL:-http://127.0.0.1:5773}"
