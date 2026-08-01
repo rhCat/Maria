@@ -1,0 +1,65 @@
+{
+  "_comment": "cws-pm playbook — Maria Central Governance (MCG). Drives the arc: a caged Maria whose tool-gate governs against the CENTRAL node (100.64.0.10:5773) with a per-name principal + one shared ledger. Each step names the GOVERNED VALIDATOR that gates the task; skill:perk must exist in the served chip (DRY_RUN checks exactly that). M0/M1/M2 are DONE (validators pass live); M3/M4 are the remaining work. Run against the central node with the mac-coop (cooperative) principal. NOTE: every 100.64.0.10 here is a PLACEHOLDER — substitute your own fleet's central-node overlay address before running. This repo is public; real tailnet addresses do not belong in it (same convention as infra/tool/fleetdash.py's fleet.json examples).",
+  "steps": [
+    {
+      "task_id": "MCG-M0-T01-no-plaintext-secrets",
+      "skill": "general:sec", "perk": "secrets",
+      "vars": {"TARGET": "/Volumes/prod/hunyuan/hermes-agent/docker-compose.maria.yml"},
+      "redeem": true
+    },
+    {
+      "task_id": "MCG-M0-T02-image-built",
+      "skill": "general:docker", "perk": "ps",
+      "vars": {"FILTER": "maria"},
+      "redeem": true
+    },
+    {
+      "task_id": "MCG-M1-T01-peragent-node-health",
+      "skill": "general:net", "perk": "healthcheck",
+      "vars": {"URL": "http://100.64.0.10:5774/health"},
+      "redeem": true
+    },
+    {
+      "task_id": "MCG-M2-T01-central-serves-gate",
+      "skill": "general:http", "perk": "get",
+      "vars": {"URL": "http://100.64.0.10:5773/catalog", "EXPECT": "hermes:toolgate"},
+      "redeem": true
+    },
+    {
+      "task_id": "MCG-M2-T02-central-ledger-intact",
+      "skill": "cws:cws-ledgercheck", "perk": "verify",
+      "vars": {"LEDGER_ROOT": "/data/body"},
+      "redeem": true
+    },
+    {
+      "task_id": "MCG-M3-T01-maria-principal",
+      "skill": "general:http", "perk": "get",
+      "vars": {"URL": "http://100.64.0.10:5773/health", "EXPECT_PRINCIPAL": "maria"},
+      "redeem": true
+    },
+    {
+      "task_id": "MCG-M3-T02-govern-central",
+      "skill": "hermes:toolgate", "perk": "read",
+      "vars": {"GOVD_URL": "http://100.64.0.10:5773", "TOOL": "read_file", "ARGS_DIGEST": "central-probe", "TARGET": "path:etc"},
+      "redeem": true
+    },
+    {
+      "task_id": "MCG-M3-T03-retire-peragent",
+      "skill": "cws:cws-deploy", "perk": "status",
+      "vars": {"SERVICE": "maria-govd", "EXPECT": "down"},
+      "redeem": true
+    },
+    {
+      "task_id": "MCG-M4-T01-fleet-registered",
+      "skill": "general:http", "perk": "get",
+      "vars": {"URL": "http://100.64.0.10:8787/", "EXPECT": "maria-dev-mac"},
+      "redeem": true
+    },
+    {
+      "task_id": "MCG-M4-T02-central-audit",
+      "skill": "cws:cws-ledgercheck", "perk": "verify",
+      "vars": {"LEDGER_ROOT": "/data/body", "GOVD_URL": "http://100.64.0.10:5773"},
+      "redeem": true
+    }
+  ]
+}

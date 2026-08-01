@@ -1,0 +1,87 @@
+{
+  "status": "ok",
+  "dry_run": true,
+  "total": 10,
+  "redeemed_total": 0,
+  "counts": {
+    "already_redeemed": 0,
+    "redeemed": 0,
+    "ran": 0,
+    "blocked_deps": 9,
+    "blocked_validator": 0,
+    "failed": 0,
+    "dry": 1
+  },
+  "steps": [
+    {
+      "task_id": "MCG-M0-T01-no-plaintext-secrets",
+      "skill": "general:sec",
+      "perk": "secrets",
+      "status": "dry",
+      "detail": "ready \u2014 would fire"
+    },
+    {
+      "task_id": "MCG-M0-T02-image-built",
+      "skill": "general:docker",
+      "perk": "ps",
+      "status": "blocked:deps",
+      "detail": "deps not redeemed: ['MCG-M0-T01-no-plaintext-secrets']"
+    },
+    {
+      "task_id": "MCG-M1-T01-peragent-node-health",
+      "skill": "general:net",
+      "perk": "healthcheck",
+      "status": "blocked:deps",
+      "detail": "deps not redeemed: ['MCG-M0-T02-image-built']"
+    },
+    {
+      "task_id": "MCG-M2-T01-central-serves-gate",
+      "skill": "general:http",
+      "perk": "get",
+      "status": "blocked:deps",
+      "detail": "deps not redeemed: ['MCG-M1-T01-peragent-node-health']"
+    },
+    {
+      "task_id": "MCG-M2-T02-central-ledger-intact",
+      "skill": "cws:cws-ledgercheck",
+      "perk": "verify",
+      "status": "blocked:deps",
+      "detail": "deps not redeemed: ['MCG-M2-T01-central-serves-gate']"
+    },
+    {
+      "task_id": "MCG-M3-T01-maria-principal",
+      "skill": "general:http",
+      "perk": "get",
+      "status": "blocked:deps",
+      "detail": "deps not redeemed: ['MCG-M2-T01-central-serves-gate']"
+    },
+    {
+      "task_id": "MCG-M3-T02-govern-central",
+      "skill": "hermes:toolgate",
+      "perk": "read",
+      "status": "blocked:deps",
+      "detail": "deps not redeemed: ['MCG-M3-T01-maria-principal']"
+    },
+    {
+      "task_id": "MCG-M3-T03-retire-peragent",
+      "skill": "cws:cws-deploy",
+      "perk": "status",
+      "status": "blocked:deps",
+      "detail": "deps not redeemed: ['MCG-M3-T02-govern-central']"
+    },
+    {
+      "task_id": "MCG-M4-T01-fleet-registered",
+      "skill": "general:http",
+      "perk": "get",
+      "status": "blocked:deps",
+      "detail": "deps not redeemed: ['MCG-M2-T01-central-serves-gate']"
+    },
+    {
+      "task_id": "MCG-M4-T02-central-audit",
+      "skill": "cws:cws-ledgercheck",
+      "perk": "verify",
+      "status": "blocked:deps",
+      "detail": "deps not redeemed: ['MCG-M3-T02-govern-central', 'MCG-M4-T01-fleet-registered']"
+    }
+  ]
+}

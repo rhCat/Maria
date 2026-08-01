@@ -1,0 +1,1 @@
+{"task_id":"MCG-M2-T02-central-ledger-intact","title":"central govd ledger chain intact","depends_on":["MCG-M2-T01-central-serves-gate"]}

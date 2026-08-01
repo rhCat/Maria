@@ -1,0 +1,10 @@
+{
+  "swarm": "maria-central-governance",
+  "milestones": [
+    {"id": "M0", "rung": 0, "label": "contained substrate", "gate_tasks": ["MCG-M0-T02-image-built"]},
+    {"id": "M1", "rung": 1, "label": "per-agent govd (stand-in)", "gate_tasks": ["MCG-M1-T01-peragent-node-health"]},
+    {"id": "M2", "rung": 2, "label": "central chip carries the gate", "gate_tasks": ["MCG-M2-T01-central-serves-gate"]},
+    {"id": "M3", "rung": 3, "label": "central governance (one principal)", "gate_tasks": ["MCG-M3-T02-govern-central", "MCG-M3-T03-retire-peragent"]},
+    {"id": "M4", "rung": 4, "label": "one shared audit trail", "gate_tasks": ["MCG-M4-T02-central-audit"]}
+  ]
+}
