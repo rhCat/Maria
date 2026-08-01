@@ -1,0 +1,236 @@
+{
+  "_comment": "Redacted snapshot of the running Maria cage, captured before migrating the deploy onto devdoc/tool/docker-compose.maria.yml. The compose file that originally launched `maria` and `llm-proxy` lived at the repo root, was never committed, and has been deleted \u2014 this is the only surviving record of that configuration. Secret VALUES are redacted (this repo is public); secret NAMES and file paths are kept, since recovery needs to know which variables were set, not what they held.",
+  "captured_from": "docker inspect",
+  "containers": {
+    "maria": {
+      "Created": "2026-07-26T03:50:47.02085959Z",
+      "StartedAt": "2026-07-31T04:48:21.126383388Z",
+      "Image": "maria",
+      "ImageId": "sha256:d5ad37adb3a2a151e58621cd12ee532e101efef39728c62e084180df33e2dfa3",
+      "Cmd": [
+        "gateway",
+        "run"
+      ],
+      "Entrypoint": [
+        "/bin/sh",
+        "-c",
+        "set -eu\numask 077\nprintf '%s' \"$MARIA_GOVD_TOKEN\" > /run/maria/govd.token\nchmod 600 /run/maria/govd.token\nchown 10000:10000 /run/maria/govd.token\nunset MARIA_GOVD_TOKEN\nprintf '%s' \"$MARIA_ED25519_KEY\" > /run/maria/agent-ed25519.key\nchmod 600 /run/maria/agent-ed25519.key\nchown 10000:10000 /run/maria/agent-ed25519.key\nunset MARIA_ED25519_KEY\nexec /init /opt/hermes/docker/main-wrapper.sh \"$@\"\n",
+        "--"
+      ],
+      "Env": [
+        "CUSTOM_BASE_URL=http://llm-proxy:4000/v1",
+        "HERMES_GOVERN_ENABLED=true",
+        "HERMES_GOVERN_URL=http://maria-govd:5773",
+        "CUSTOM_API_KEY=<REDACTED>",
+        "HERMES_GOVERN_AUTH_SCHEME=ed25519",
+        "HERMES_GOVERN_TOKEN_FILE=/run/maria/govd.token",
+        "MARIA_ED25519_KEY=<REDACTED>",
+        "HERMES_UID=10000",
+        "HERMES_GOVERN_KEY_FILE=/run/maria/agent-ed25519.key",
+        "HERMES_GOVERN_FAIL_OPEN=false",
+        "MARIA_GOVD_TOKEN=<REDACTED>",
+        "HERMES_GID=10000",
+        "PATH=/opt/hermes/bin:/opt/hermes/.venv/bin:/opt/data/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "PYTHONUNBUFFERED=1",
+        "PYTHONDONTWRITEBYTECODE=1",
+        "DEBIAN_FRONTEND=noninteractive",
+        "PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/.playwright",
+        "npm_config_install_links=false",
+        "HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist",
+        "HERMES_TUI_DIR=/opt/hermes/ui-tui",
+        "HERMES_HOME=/opt/data",
+        "HERMES_WRITE_SAFE_ROOT=/opt/data",
+        "HERMES_DISABLE_LAZY_INSTALLS=1",
+        "HERMES_LAZY_INSTALL_TARGET=/opt/data/lazy-packages"
+      ],
+      "Labels": {
+        "com.docker.compose.config-hash": "5ce6ae14b9054b0c0974d5db7ad6f0823fed5a8593d09e8d78d410614dbc1995",
+        "com.docker.compose.container-number": "1",
+        "com.docker.compose.depends_on": "maria-govd:service_healthy:false,llm-proxy:service_healthy:false",
+        "com.docker.compose.image": "sha256:d5ad37adb3a2a151e58621cd12ee532e101efef39728c62e084180df33e2dfa3",
+        "com.docker.compose.oneoff": "False",
+        "com.docker.compose.project": "maria",
+        "com.docker.compose.project.config_files": "/Volumes/prod/hunyuan/hermes-agent/docker-compose.maria.yml",
+        "com.docker.compose.project.working_dir": "/Volumes/prod/hunyuan/hermes-agent",
+        "com.docker.compose.replace": "maria",
+        "com.docker.compose.service": "maria",
+        "com.docker.compose.version": "5.3.1",
+        "org.opencontainers.image.version": "24.04"
+      },
+      "Mounts": [
+        {
+          "Type": "volume",
+          "Name": "maria_maria_state",
+          "Source": "/var/lib/docker/volumes/maria_maria_state/_data",
+          "Destination": "/opt/data",
+          "RW": true
+        },
+        {
+          "Type": "volume",
+          "Name": "maria_maria_logs",
+          "Source": "/var/lib/docker/volumes/maria_maria_logs/_data",
+          "Destination": "/opt/logs",
+          "RW": true
+        }
+      ],
+      "Networks": [
+        "maria_cage"
+      ],
+      "PortBindings": {},
+      "Tmpfs": {
+        "/run/maria": "mode=0700,uid=10000,gid=10000"
+      },
+      "RestartPolicy": {
+        "Name": "unless-stopped",
+        "MaximumRetryCount": 0
+      }
+    },
+    "maria-govd": {
+      "Created": "2026-07-31T01:06:10.340064585Z",
+      "StartedAt": "2026-07-31T04:48:10.523543967Z",
+      "Image": "ghcr.io/rhcat/cyberware-body:latest",
+      "ImageId": "sha256:e72e9546f972f5d00cd9835912d85dcf9a31e04bbf39fd96255597d683faa88b",
+      "Cmd": [
+        "python3",
+        "-m",
+        "infra.govern.chipfetch",
+        "--exec",
+        "/usr/local/bin/body-entrypoint.sh"
+      ],
+      "Entrypoint": null,
+      "Env": [
+        "GOVD_AUTH_VERIFIER=ed25519",
+        "FLEETD_NODE_ID=maria-dev-mac",
+        "CLOUD_MODE=1",
+        "CLOUD_SOURCE=https://github.com/rhCat/skillChip.git",
+        "CLOUD_SOURCE_TAG=1cde76d0a575e0976f61977d4d8ce15e5e4d2d54",
+        "GOVD_PORT=5773",
+        "GOVD_RECORD_ROOT=/data/body",
+        "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG=C.UTF-8",
+        "GPG_KEY=A035C8C19219BA821ECEA86B64E628F8D684696D",
+        "PYTHON_VERSION=3.11.15",
+        "PYTHON_SHA256=272179ddd9a2e41a0fc8e42e33dfbdca0b3711aa5abf372d3f2d51543d09b625",
+        "TLA2TOOLS_JAR=/usr/local/lib/tla2tools.jar",
+        "EXOD_SOCKET=/data/body/exod.sock",
+        "EXOD_SANDBOX_BACKEND=bwrap",
+        "PYTHONUNBUFFERED=1"
+      ],
+      "Labels": {
+        "com.docker.compose.config-hash": "15f03aff958119435282d9eb4accedac90c63683d3f7ad138a3d9cbe29d875b4",
+        "com.docker.compose.container-number": "1",
+        "com.docker.compose.depends_on": "",
+        "com.docker.compose.image": "sha256:e72e9546f972f5d00cd9835912d85dcf9a31e04bbf39fd96255597d683faa88b",
+        "com.docker.compose.oneoff": "False",
+        "com.docker.compose.project": "maria",
+        "com.docker.compose.project.config_files": "/Volumes/prod/hunyuan/hermes-agent/devdoc/tool/docker-compose.maria.yml",
+        "com.docker.compose.project.working_dir": "/Volumes/prod/hunyuan/hermes-agent/devdoc/tool",
+        "com.docker.compose.replace": "maria-govd",
+        "com.docker.compose.service": "maria-govd",
+        "com.docker.compose.version": "5.3.1",
+        "org.opencontainers.image.created": "2026-07-30T23:01:50.565Z",
+        "org.opencontainers.image.description": "",
+        "org.opencontainers.image.licenses": "MIT",
+        "org.opencontainers.image.revision": "51fa05a6871c2b8d3a0b39d510b07f140d22d96e",
+        "org.opencontainers.image.source": "https://github.com/rhCat/cyberware",
+        "org.opencontainers.image.title": "cyberware",
+        "org.opencontainers.image.url": "https://github.com/rhCat/cyberware",
+        "org.opencontainers.image.version": "1.9.0"
+      },
+      "Mounts": [
+        {
+          "Type": "volume",
+          "Name": "maria_maria_govd_data",
+          "Source": "/var/lib/docker/volumes/maria_maria_govd_data/_data",
+          "Destination": "/data",
+          "RW": true
+        },
+        {
+          "Type": "volume",
+          "Name": "8e864f54840c9fbc34e2ffd58ee31bd5c3916c2d4c038f4496eff48c978e819b",
+          "Source": "/var/lib/docker/volumes/8e864f54840c9fbc34e2ffd58ee31bd5c3916c2d4c038f4496eff48c978e819b/_data",
+          "Destination": "/data/body",
+          "RW": true
+        }
+      ],
+      "Networks": [
+        "maria_cage",
+        "maria_uplink"
+      ],
+      "PortBindings": {
+        "5773/tcp": [
+          {
+            "HostIp": "100.101.222.80",
+            "HostPort": "5774"
+          }
+        ]
+      },
+      "Tmpfs": null,
+      "RestartPolicy": {
+        "Name": "unless-stopped",
+        "MaximumRetryCount": 0
+      }
+    },
+    "maria-llm-proxy": {
+      "Created": "2026-07-25T05:53:53.501789792Z",
+      "StartedAt": "2026-07-31T04:48:10.527032133Z",
+      "Image": "maria-llm-proxy",
+      "ImageId": "sha256:1197e7cac0fe66e08f176dab56c9467b6a5edfd3c257c42a37434c6d387bdbaa",
+      "Cmd": [
+        "--config",
+        "/etc/litellm/config.yaml",
+        "--port",
+        "4000",
+        "--host",
+        "0.0.0.0"
+      ],
+      "Entrypoint": [
+        "docker/prod_entrypoint.sh"
+      ],
+      "Env": [
+        "LOCAL_LLM_BASE=http://100.74.54.74:8081/v1",
+        "LOCAL_LLM_TOKEN=<REDACTED>",
+        "LITELLM_MASTER_KEY=<REDACTED>",
+        "PATH=/app/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/sbin:/bin",
+        "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
+        "PRISMA_BINARY_CACHE_DIR=/opt/prisma/binaries",
+        "PRISMA_CLI_PATH=/opt/prisma/binaries/node_modules/.bin/prisma",
+        "PRISMA_CLI_QUERY_ENGINE_TYPE=binary",
+        "PRISMA_OFFLINE_MODE=true"
+      ],
+      "Labels": {
+        "com.docker.compose.config-hash": "ba9509226035a5237c8bb4d6728d6efc383b3f27ec52eea86fb341f177dafe9a",
+        "com.docker.compose.container-number": "1",
+        "com.docker.compose.depends_on": "",
+        "com.docker.compose.image": "sha256:1197e7cac0fe66e08f176dab56c9467b6a5edfd3c257c42a37434c6d387bdbaa",
+        "com.docker.compose.oneoff": "False",
+        "com.docker.compose.project": "maria",
+        "com.docker.compose.project.config_files": "/Volumes/prod/hunyuan/hermes-agent/docker-compose.maria.yml",
+        "com.docker.compose.project.working_dir": "/Volumes/prod/hunyuan/hermes-agent",
+        "com.docker.compose.replace": "maria-llm-proxy",
+        "com.docker.compose.service": "llm-proxy",
+        "com.docker.compose.version": "5.3.1",
+        "dev.chainguard.image.title": "wolfi-base",
+        "dev.chainguard.package.main": "",
+        "org.opencontainers.image.authors": "Chainguard Team https://www.chainguard.dev/",
+        "org.opencontainers.image.created": "2026-07-02T22:43:55Z",
+        "org.opencontainers.image.revision": "052b5a2169d8d3082e1d66e69f200a72b0c1e274",
+        "org.opencontainers.image.source": "https://github.com/BerriAI/litellm",
+        "org.opencontainers.image.title": "wolfi-base",
+        "org.opencontainers.image.url": "https://images.chainguard.dev/directory/image/wolfi-base/overview",
+        "org.opencontainers.image.vendor": "Chainguard"
+      },
+      "Mounts": [],
+      "Networks": [
+        "maria_cage",
+        "maria_uplink"
+      ],
+      "PortBindings": {},
+      "Tmpfs": null,
+      "RestartPolicy": {
+        "Name": "unless-stopped",
+        "MaximumRetryCount": 0
+      }
+    }
+  }
+}

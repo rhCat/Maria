@@ -1,0 +1,11 @@
+{
+  "skill": "cws:cws-pm",
+  "perk": "run",
+  "record_store": "/Volumes/prod/hunyuan/hermes-agent/governance-pm/record_store",
+  "vars": {
+    "PLAYBOOK": "/Volumes/prod/hunyuan/hermes-agent/governance-pm/playbook.json",
+    "SWARM_DIR": "/Volumes/prod/hunyuan/hermes-agent/governance-pm/swarm",
+    "GOVD_URL": "http://100.64.0.10:5773",
+    "DRY_RUN": "1"
+  }
+}

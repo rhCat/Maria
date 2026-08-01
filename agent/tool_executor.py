@@ -169,6 +169,45 @@ def _is_interpreter_shutdown_submit_error(exc: RuntimeError) -> bool:
     return "cannot schedule new futures after interpreter shutdown" in str(exc)
 
 
+def _apply_govern_gate(agent, function_name: str, function_args: dict) -> Optional[str]:
+    """Mandatory cyberware governance gate for one tool call.
+
+    Returns ``None`` to allow execution, or a block message string to deny.
+    A govd ``push_back`` is resolved to allow/deny inside the gate via the
+    existing per-thread human-approval callback, so this only ever surfaces a
+    terminal allow/deny. Any unexpected error fails closed (deny) — matching
+    the gate's own fail-closed posture — unless governance is disabled.
+    """
+    try:
+        from agent import govern_gate
+    except Exception as exc:  # pragma: no cover - import guard
+        logger.error("govern_gate import failed, denying %s: %s", function_name, exc)
+        return f"BLOCKED: cyberware governance unavailable ({exc})."
+
+    if not govern_gate.is_enabled():
+        return None
+
+    # Reuse the same per-thread approval callback the terminal guard uses, so a
+    # govd push_back surfaces through the CLI prompt / gateway queue already
+    # wired for this session.
+    approval_cb = None
+    try:
+        from tools.terminal_tool import _get_approval_callback
+        approval_cb = _get_approval_callback()
+    except Exception:
+        approval_cb = None
+
+    verdict = govern_gate.govern_tool_call(
+        function_name,
+        function_args or {},
+        session_key=getattr(agent, "session_id", "") or "",
+        approval_callback=approval_cb,
+    )
+    if verdict.allowed:
+        return None
+    return verdict.block_message()
+
+
 def _emit_terminal_post_tool_call(
     agent,
     *,
@@ -444,6 +483,24 @@ def _run_agent_tool_execution_middleware(
             )
             if guardrail_decision.allows_execution:
                 guardrail_decision = None
+
+        # ── Mandatory cyberware governance gate ──────────────────────────
+        # The bottom decision authority for EVERY tool call. This is the one
+        # narrow waist: all 11 dispatch sites across the concurrent and
+        # sequential executors funnel through _authorized_dispatch, and
+        # execute_tool_calls_segmented delegates to those two.
+        #
+        # It runs on final_args — AFTER Relay rewrites and tool-request
+        # middleware — so the claim's ARGS_DIGEST covers what will actually
+        # execute rather than what the model first proposed.
+        #
+        # A govd reject, or a fail-closed deny, blocks here through the same
+        # path as a plugin block; push_back is resolved to allow/deny inside
+        # the gate via the human-approval surface.
+        if block_message is None and guardrail_decision is None:
+            block_message = _apply_govern_gate(agent, function_name, final_args)
+            if block_message is not None:
+                block_error_type = "govern_block"
 
         if block_message is not None or guardrail_decision is not None:
             _advance_start_order()
@@ -1687,6 +1744,10 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                         skip_pre_tool_call_hook=True,
                         skip_tool_request_middleware=True,
                         skip_tool_execution_middleware=True,
+                        # _authorized_dispatch already ran the mandatory govern
+                        # gate for this tool_call before invoking this execute
+                        # callback; don't double-claim in the dispatcher.
+                        skip_govern_gate=True,
                         tool_request_middleware_trace=list(middleware_trace),
                         enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                         disabled_toolsets=getattr(agent, "disabled_toolsets", None),
@@ -1757,6 +1818,10 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                         skip_pre_tool_call_hook=True,
                         skip_tool_request_middleware=True,
                         skip_tool_execution_middleware=True,
+                        # _authorized_dispatch already ran the mandatory govern
+                        # gate for this tool_call before invoking this execute
+                        # callback; don't double-claim in the dispatcher.
+                        skip_govern_gate=True,
                         tool_request_middleware_trace=list(middleware_trace),
                         enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                         disabled_toolsets=getattr(agent, "disabled_toolsets", None),

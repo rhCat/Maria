@@ -1,0 +1,196 @@
+# Dockerfile.maria — contained Maria build on Ubuntu 24.04 LTS.
+#
+# Derived from the upstream ./Dockerfile. Deltas, and only these:
+#
+#   1. Base is ubuntu:24.04 (Noble) instead of debian:13.4. Note: there is no
+#      "Ubuntu 24.2" — 24.04 is the LTS; 24.04.x are its point releases, and
+#      the `24.04` tag always resolves to the current one.
+#   2. `docker-cli` is DROPPED from the apt set. It does not exist in Ubuntu's
+#      archive (there it is `docker.io`), and the contained deployment never
+#      mounts the docker socket, so the CLI would be dead weight AND a standing
+#      escape tool if the socket ever appeared. Removing it is containment, not
+#      just portability.
+#   3. UV_PYTHON is pinned to the system interpreter (Ubuntu 24.04 ships 3.12,
+#      which satisfies pyproject's `requires-python = ">=3.11,<3.14"`) so the
+#      venv is deterministic instead of depending on uv's managed-Python fetch.
+#
+# LAYER ORDER IS THE POINT: everything that is not Maria's own source is
+# installed first, cheapest-to-invalidate last. A source-only edit re-runs only
+# the final two layers. The expensive layers, in order, are npm+playwright,
+# then `uv sync`, then the frontend build — each keyed on its own manifests.
+#
+#   build:  docker compose -f docker-compose.maria.yml build maria
+
+FROM ghcr.io/astral-sh/uv:0.11.6-python3.13-trixie@sha256:b3c543b6c4f23a5f2df22866bd7857e5d304b67a564f4feab6ac22044dde719b AS uv_source
+# Node 22 LTS from upstream — Ubuntu 24.04's nodejs is 18.x, well past EOL.
+# bookworm-slim links against glibc 2.36, which runs cleanly on noble's 2.39.
+FROM node:22-bookworm-slim@sha256:7af03b14a13c8cdd38e45058fd957bf00a72bbe17feac43b1c15a689c029c732 AS node_source
+
+# ---------- Layer 1: base ----------
+FROM ubuntu:24.04
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/.playwright
+
+# ---------- Layer 2: system packages ----------
+# docker-cli deliberately absent — see header note 2.
+RUN apt-get -o Acquire::Retries=3 update && \
+    apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+    ca-certificates curl iputils-ping python3 python-is-python3 ripgrep ffmpeg \
+    gcc g++ make cmake python3-dev python3-venv libffi-dev libolm-dev procps \
+    git openssh-client xz-utils && \
+    rm -rf /var/lib/apt/lists/*
+
+# ---------- Layer 3: s6-overlay ----------
+ARG TARGETARCH
+ARG S6_OVERLAY_VERSION=3.2.3.0
+ARG S6_OVERLAY_NOARCH_SHA256=b720f9d9340efc8bb07528b9743813c836e4b02f8693d90241f047998b4c53cf
+ARG S6_OVERLAY_X86_64_SHA256=a93f02882c6ed46b21e7adb5c0add86154f01236c93cd82c7d682722e8840563
+ARG S6_OVERLAY_AARCH64_SHA256=0952056ff913482163cc30e35b2e944b507ba1025d78f5becbb89367bf344581
+ARG S6_OVERLAY_SYMLINKS_SHA256=a60dc5235de3ecbcf874b9c1f18d73263ab99b289b9329aa950e8729c4789f0e
+RUN set -eu; \
+    case "${TARGETARCH:-arm64}" in \
+        amd64) s6_arch="x86_64"; s6_arch_sha="${S6_OVERLAY_X86_64_SHA256}" ;; \
+        arm64) s6_arch="aarch64"; s6_arch_sha="${S6_OVERLAY_AARCH64_SHA256}" ;; \
+        *) echo "Unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    base="https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}"; \
+    curl -fsSL --retry 3 -o /tmp/s6-overlay-noarch.tar.xz "${base}/s6-overlay-noarch.tar.xz"; \
+    curl -fsSL --retry 3 -o /tmp/s6-overlay-symlinks-noarch.tar.xz "${base}/s6-overlay-symlinks-noarch.tar.xz"; \
+    curl -fsSL --retry 3 -o /tmp/s6-overlay-arch.tar.xz "${base}/s6-overlay-${s6_arch}.tar.xz"; \
+    { \
+        printf '%s  %s\n' "${S6_OVERLAY_NOARCH_SHA256}" /tmp/s6-overlay-noarch.tar.xz; \
+        printf '%s  %s\n' "${s6_arch_sha}" /tmp/s6-overlay-arch.tar.xz; \
+        printf '%s  %s\n' "${S6_OVERLAY_SYMLINKS_SHA256}" /tmp/s6-overlay-symlinks-noarch.tar.xz; \
+    } > /tmp/s6-overlay.sha256; \
+    sha256sum -c /tmp/s6-overlay.sha256; \
+    tar -C / -Jxpf /tmp/s6-overlay-noarch.tar.xz; \
+    tar -C / -Jxpf /tmp/s6-overlay-arch.tar.xz; \
+    tar -C / -Jxpf /tmp/s6-overlay-symlinks-noarch.tar.xz; \
+    rm /tmp/s6-overlay-*.tar.xz /tmp/s6-overlay.sha256
+
+COPY --chmod=0755 docker/tini-shim.sh /usr/bin/tini
+
+# ---------- Layer 4: runtime user + toolchain ----------
+# Ubuntu 24.04 ships an `ubuntu` user at UID 1000; 10000 is free, as upstream.
+RUN useradd -u 10000 -m -d /opt/data hermes
+
+COPY --chmod=0755 --from=uv_source /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
+COPY --chmod=0755 --from=node_source /usr/local/bin/node /usr/local/bin/
+COPY --from=node_source /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+COPY --from=node_source /usr/local/lib/node_modules/corepack /usr/local/lib/node_modules/corepack
+RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
+    ln -sf /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx && \
+    ln -sf /usr/local/lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack
+
+WORKDIR /opt/hermes
+
+# ---------- Layer 5: npm deps (keyed on lockfiles only) ----------
+COPY package.json package-lock.json ./
+COPY web/package.json web/
+COPY ui-tui/package.json ui-tui/
+COPY ui-tui/packages/hermes-ink/ ui-tui/packages/hermes-ink/
+COPY apps/shared/ apps/shared/
+ENV npm_config_install_links=false
+RUN npm install --prefer-offline --no-audit --fetch-retries=5 && \
+    for i in 1 2 3; do \
+        npx playwright install --with-deps chromium --only-shell && break || \
+        { [ "$i" = 3 ] && exit 1; echo "playwright install failed (attempt $i); retrying in 10s"; sleep 10; }; \
+    done && \
+    npm cache clean --force
+
+# ---------- Layer 6: python deps (keyed on pyproject + uv.lock only) ----------
+COPY pyproject.toml uv.lock ./
+RUN touch ./README.md
+# Pin the interpreter: noble's python3 is 3.12, inside requires-python's
+# ">=3.11,<3.14". Without this uv may fetch a managed Python and the venv stops
+# being reproducible across build hosts.
+#
+# UV_PYTHON is set INLINE, for this step only — never as an ENV. As an ENV it
+# also overrides venv discovery for the later `uv pip install -e .`, which then
+# targets the system interpreter and dies on Ubuntu's PEP 668
+# externally-managed marker ("error: externally-managed-environment").
+RUN UV_PYTHON=/usr/bin/python3 uv sync --frozen --no-install-project \
+        --extra all --extra messaging \
+        --extra anthropic --extra bedrock --extra azure-identity \
+        --extra hindsight --extra matrix
+
+# ---------- Layer 7: frontend build (keyed on frontend source only) ----------
+COPY web/ web/
+COPY ui-tui/ ui-tui/
+COPY apps/shared/ apps/shared/
+RUN cd web && npm run build && \
+    cd ../ui-tui && npm run build
+
+# ---------- Layer 8: MARIA'S OWN SOURCE — last, so edits cost only this ------
+COPY --link --chmod=a+rX,go-w . .
+RUN uv pip install --no-cache-dir --no-deps -e "."
+
+USER root
+RUN mkdir -p /opt/hermes/bin && \
+    cp /opt/hermes/docker/hermes-exec-shim.sh /opt/hermes/bin/hermes && \
+    chmod 0755 /opt/hermes/bin/hermes && \
+    printf 'docker\n' > /opt/hermes/.install_method
+
+ARG HERMES_GIT_SHA=
+RUN if [ -n "${HERMES_GIT_SHA}" ]; then \
+        printf '%s\n' "${HERMES_GIT_SHA}" > /opt/hermes/.hermes_build_sha; \
+    fi
+
+# ---------- s6 service wiring ----------
+COPY docker/s6-rc.d/ /etc/s6-overlay/s6-rc.d/
+RUN mkdir -p /etc/cont-init.d && \
+    printf '#!/command/with-contenv sh\nexec /opt/hermes/docker/stage2-hook.sh\n' \
+        > /etc/cont-init.d/01-hermes-setup && \
+    chmod +x /etc/cont-init.d/01-hermes-setup
+COPY --chmod=0755 docker/cont-init.d/005-assert-governed /etc/cont-init.d/005-assert-governed
+COPY --chmod=0755 docker/cont-init.d/015-supervise-perms /etc/cont-init.d/015-supervise-perms
+COPY --chmod=0755 docker/cont-init.d/02-reconcile-profiles /etc/cont-init.d/02-reconcile-profiles
+
+# ---------- Runtime ----------
+# Governance is a property of THIS IMAGE, not of whoever writes the compose
+# file. agent/govern_gate.py reads these once at import from the environment
+# only (H1) and defaults ENABLED to False, so an unconfigured container would
+# come up UNGOVERNED. Baking them here inverts that default for the image.
+#
+# Two limits, so nobody mistakes this for the whole fix:
+#   * 005-assert-governed DETECTS a run-time override but does not stop the
+#     boot (S6_BEHAVIOUR_IF_STAGE2_FAILS defaults to 0 = continue silently).
+#   * ENV establishes a default for PID 1 and its descendants; it is not an
+#     enforcement boundary, because a process controls its own environment.
+# Durable enforcement requires the authority to live somewhere the agent
+# cannot write — a root-owned marker consulted at import — rather than in
+# the environment. Tracked as follow-up work.
+#
+# Deployment-specific endpoints (HERMES_GOVERN_URL and friends) are
+# deliberately NOT baked here: they are supplied at run time from the
+# deployment's own environment, so no site's topology lands in this file.
+ENV HERMES_GOVERN_ENABLED=true
+ENV HERMES_GOVERN_FAIL_OPEN=false
+
+# H4: the governed marker. The ENV lines above are a DEFAULT, not a boundary —
+# any descendant can clear its own environment. This file is the boundary:
+# root-owned, mode 0644, inside a 0755 root-owned directory, so the
+# unprivileged agent account (uid 10000) can neither rewrite nor unlink it.
+# agent/govern_gate.py reads it at import and lets it WIN over the
+# environment, so a child cannot start itself ungoverned.
+RUN mkdir -p /etc/maria && \
+    printf '%s\n' 'This deployment is governed. See agent/govern_gate.py (H4).' \
+        > /etc/maria/governed && \
+    chown -R root:root /etc/maria && \
+    chmod 0755 /etc/maria && \
+    chmod 0644 /etc/maria/governed
+ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
+ENV HERMES_TUI_DIR=/opt/hermes/ui-tui
+ENV HERMES_HOME=/opt/data
+ENV HERMES_WRITE_SAFE_ROOT=/opt/data
+ENV HERMES_DISABLE_LAZY_INSTALLS=1
+ENV HERMES_LAZY_INSTALL_TARGET=/opt/data/lazy-packages
+ENV PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/opt/data/.local/bin:${PATH}"
+RUN mkdir -p /opt/data
+VOLUME [ "/opt/data" ]
+
+ENTRYPOINT ["/init", "/opt/hermes/docker/main-wrapper.sh"]
+CMD ["gateway", "run"]

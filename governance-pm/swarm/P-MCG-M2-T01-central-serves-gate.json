@@ -1,0 +1,1 @@
+{"task_id":"MCG-M2-T01-central-serves-gate","title":"central node serves hermes:toolgate verified","depends_on":["MCG-M1-T01-peragent-node-health"]}
