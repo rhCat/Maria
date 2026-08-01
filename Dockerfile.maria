@@ -145,10 +145,30 @@ RUN mkdir -p /etc/cont-init.d && \
     printf '#!/command/with-contenv sh\nexec /opt/hermes/docker/stage2-hook.sh\n' \
         > /etc/cont-init.d/01-hermes-setup && \
     chmod +x /etc/cont-init.d/01-hermes-setup
+COPY --chmod=0755 docker/cont-init.d/005-assert-governed /etc/cont-init.d/005-assert-governed
 COPY --chmod=0755 docker/cont-init.d/015-supervise-perms /etc/cont-init.d/015-supervise-perms
 COPY --chmod=0755 docker/cont-init.d/02-reconcile-profiles /etc/cont-init.d/02-reconcile-profiles
 
 # ---------- Runtime ----------
+# Governance is a property of THIS IMAGE, not of whoever writes the compose
+# file. agent/govern_gate.py reads these once at import from the environment
+# only (H1) and defaults ENABLED to False, so an unconfigured container would
+# come up UNGOVERNED. Baking them here inverts that default for the image.
+#
+# Two limits, so nobody mistakes this for the whole fix:
+#   * 005-assert-governed DETECTS a run-time override but does not stop the
+#     boot (S6_BEHAVIOUR_IF_STAGE2_FAILS defaults to 0 = continue silently).
+#   * ENV establishes a default for PID 1 and its descendants; it is not an
+#     enforcement boundary, because a process controls its own environment.
+# Durable enforcement requires the authority to live somewhere the agent
+# cannot write — a root-owned marker consulted at import — rather than in
+# the environment. Tracked as follow-up work.
+#
+# Deployment-specific endpoints (HERMES_GOVERN_URL and friends) are
+# deliberately NOT baked here: they are supplied at run time from the
+# deployment's own environment, so no site's topology lands in this file.
+ENV HERMES_GOVERN_ENABLED=true
+ENV HERMES_GOVERN_FAIL_OPEN=false
 ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
 ENV HERMES_TUI_DIR=/opt/hermes/ui-tui
 ENV HERMES_HOME=/opt/data
