@@ -1035,6 +1035,18 @@ class CLICommandsMixin:
             except Exception:
                 pass
 
+            # Rebind the context engine to the resumed session (DB replay, no carryover) (#77538)
+            try:
+                transition = getattr(self.agent, "_transition_context_engine_session", None)
+                if transition is not None:
+                    transition(
+                        old_session_id=old_session_id,
+                        new_session_id=target_id,
+                        carry_over_context=False,
+                    )
+            except Exception:
+                pass
+
         title_part = f" \"{session_meta['title']}\"" if session_meta.get("title") else ""
         msg_count = len([m for m in self._resume_display_history if m.get("role") == "user" and not m.get("display_kind")])
         if self.conversation_history:
@@ -1233,6 +1245,18 @@ class CLICommandsMixin:
                         parent_session_id=parent_session_id or "",
                         reset=False,
                         reason="branch",
+                    )
+            except Exception:
+                pass
+
+            # Rebind the context engine to the branched session (DB replay, no carryover) (#77538)
+            try:
+                transition = getattr(self.agent, "_transition_context_engine_session", None)
+                if transition is not None:
+                    transition(
+                        old_session_id=parent_session_id,
+                        new_session_id=new_session_id,
+                        carry_over_context=False,
                     )
             except Exception:
                 pass
