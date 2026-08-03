@@ -43,9 +43,7 @@ class NousProfile(ProviderProfile):
         sticky_key = get_conversation_context() or session_id
         if sticky_key:
             body["session_id"] = sticky_key
-        provider_preferences = context.get("provider_preferences")
-        if provider_preferences:
-            body["provider"] = provider_preferences
+        # Don't forward provider_routing prefs — Portal rejects them with HTTP 400 (#77564)
         return body
 
     def build_api_kwargs_extras(
