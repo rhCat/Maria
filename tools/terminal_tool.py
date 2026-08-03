@@ -1080,6 +1080,8 @@ PTY: set pty=true for interactive CLIs (they hang without it). Pipe git output t
 # Global state for environment lifecycle management
 _active_environments: Dict[str, Any] = {}
 _last_activity: Dict[str, float] = {}
+# Task ids with an in-flight foreground env.execute() — reaper keeps these alive (#77589)
+_foreground_task_ids: set[str] = set()
 _env_lock = threading.Lock()
 _creation_locks: Dict[str, threading.Lock] = {}  # Per-task locks for sandbox creation
 _creation_locks_lock = threading.Lock()  # Protects _creation_locks dict itself
@@ -1780,6 +1782,11 @@ def _cleanup_inactive_envs(lifetime_seconds: int = 300):
                 _last_activity[task_id] = current_time  # Keep sandbox alive
     except ImportError:
         pass
+
+    # Keep alive sandboxes with in-flight foreground commands (not in process_registry) (#77589)
+    for task_id in list(_foreground_task_ids):
+        if task_id in _last_activity:
+            _last_activity[task_id] = current_time
 
     # Phase 1: collect stale entries and remove them from tracking dicts while
     # holding the lock.  Do NOT call env.cleanup() inside the lock -- Modal and
@@ -2931,7 +2938,14 @@ def terminal_tool(
                         # reads, RPC reads) intentionally stay unbounded.
                         "bounded_capture": True,
                     }
-                    result = env.execute(command, **execute_kwargs)
+                    # Mark in-flight foreground so the idle reaper never tears it down (#77589)
+                    with _env_lock:
+                        _foreground_task_ids.add(effective_task_id)
+                    try:
+                        result = env.execute(command, **execute_kwargs)
+                    finally:
+                        with _env_lock:
+                            _foreground_task_ids.discard(effective_task_id)
                 except Exception as e:
                     error_str = str(e).lower()
                     if "timeout" in error_str:
