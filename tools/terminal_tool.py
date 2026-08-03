@@ -1217,8 +1217,10 @@ def get_session_cwd(session_key: Optional[str]) -> Optional[str]:
 
 def clear_session_cwd(session_key: str) -> None:
     """Drop a session's cwd record (session teardown)."""
+    # Normalize like record/get (str(session_key or "default")) so a falsy key clears the record (#77585)
+    key = str(session_key or "default")
     with _session_cwd_lock:
-        _session_cwd.pop(session_key, None)
+        _session_cwd.pop(key, None)
 
 
 def register_task_env_overrides(task_id: str, overrides: Dict[str, Any]):
@@ -1256,8 +1258,15 @@ def register_task_env_overrides(task_id: str, overrides: Dict[str, Any]):
         # updates the originating session's env.
         container_id = _resolve_container_task_id(task_id)
         with _env_lock:
-            env = _active_environments.get(task_id) or _active_environments.get(container_id)
-        if env is not None and getattr(env, "cwd", None) is not None:
+            # Cache key the env was found under — CWD-only overrides collapse to shared "default"
+            env = _active_environments.get(task_id)
+            if env is None:
+                env = _active_environments.get(container_id)
+                env_key = container_id
+            else:
+                env_key = task_id
+        # Don't mutate the shared "default" env.cwd — would leak this session's cwd into others (#77585)
+        if env is not None and getattr(env, "cwd", None) is not None and env_key != "default":
             env.cwd = new_cwd
 
 
