@@ -28,10 +28,13 @@ from hermes_cli.auth import (
     _auth_store_lock,
     _codex_access_token_is_expiring,
     _decode_jwt_claims,
+    _global_auth_file_path,
     _load_auth_store,
     _load_provider_state,
+    _load_provider_state_with_source,
     _resolve_kimi_base_url,
     _resolve_zai_base_url,
+    _same_path,
     _save_auth_store,
     _save_provider_state,
     _store_provider_state,
@@ -792,7 +795,7 @@ class CredentialPool:
         device_code-sourced entries; env/API-key-sourced entries have no
         auth.json shadow to sync from.
         """
-        if self.provider != "openai-codex" or entry.source != "device_code":
+        if self.provider != "openai-codex" or entry.source not in ("device_code", "manual:device_code"):
             return entry
         try:
             with _auth_store_lock():
@@ -808,19 +811,43 @@ class CredentialPool:
             # Adopt auth.json tokens when either side differs.  Codex refresh
             # tokens are single-use too, so a fresh refresh_token from
             # another process means our entry's pair is consumed/stale.
+            #
+            # Also adopt when the store has a refresh_token but no
+            # access_token — another process may have rotated the pair
+            # and the store entry's access_token was already consumed;
+            # the important signal is the refresh_token difference.
             entry_access = entry.access_token or ""
             entry_refresh = entry.refresh_token or ""
+            should_adopt = False
             if store_access and (
                 store_access != entry_access
                 or (store_refresh and store_refresh != entry_refresh)
             ):
+                should_adopt = True
+            elif (
+                store_refresh
+                and store_refresh != entry_refresh
+                and not store_access
+            ):
+                # Store has only a refresh_token (no access_token) —
+                # another process rotated the pair.  Adopt the
+                # refresh_token so we don't replay the consumed one.
+                logger.info(
+                    "Pool entry %s: auth.json has newer refresh_token "
+                    "but no access_token; adopting refresh_token to "
+                    "avoid replaying consumed token",
+                    entry.id,
+                )
+                should_adopt = True
+
+            if should_adopt:
                 logger.debug(
                     "Pool entry %s: syncing Codex tokens from auth.json "
                     "(refreshed by another process)",
                     entry.id,
                 )
                 field_updates: Dict[str, Any] = {
-                    "access_token": store_access,
+                    "access_token": store_access or entry.access_token,
                     "refresh_token": store_refresh or entry.refresh_token,
                     "last_status": None,
                     "last_status_at": None,
@@ -1039,32 +1066,58 @@ class CredentialPool:
         try:
             with _auth_store_lock():
                 auth_store = _load_auth_store()
-                # Decide BEFORE writing whether this profile is reading the
-                # grant from the global root (no own providers.<id> block) vs.
-                # genuinely shadowing it. A pool refresh rotates single-use
-                # OAuth refresh tokens, so a profile that resolved the grant
-                # from root MUST write the rotated chain back to root too —
-                # otherwise root keeps a revoked refresh token and every other
-                # profile reading the stale root grant dies with
-                # refresh_token_reused / invalid_grant once its access token
-                # expires. This mirrors the xAI write-through in
-                # hermes_cli.auth._save_xai_oauth_tokens (#43589); the pool
-                # refresh path is the Codex/xAI analog reported in #48415.
                 _wt_provider_id = {
                     "nous": "nous",
                     "openai-codex": "openai-codex",
                     "xai-oauth": "xai-oauth",
                 }.get(self.provider)
-                write_through_to_root = bool(_wt_provider_id) and not (
-                    isinstance(auth_store.get("providers"), dict)
-                    and isinstance(
-                        auth_store["providers"].get(_wt_provider_id), dict
-                    )
-                )
+                # Resolve state and track which store it came from — the
+                # source path tells us whether this profile genuinely owns
+                # its provider block or is reading from the global root.
+                # #74339: the old key-presence check decided write-through
+                # on whether the profile had ``providers.<id>`` BEFORE the
+                # save — correct for the first refresh but self-sealing
+                # because ``_store_provider_state`` unconditionally creates
+                # that key inside the same function.  Once the profile has
+                # the key, every subsequent refresh silently disables the
+                # root write-through and root keeps a revoked refresh token.
+                #
+                # Fix: use ``_load_provider_state_with_source`` to learn
+                # where the state was resolved from.  When the grant was
+                # resolved from the global root, write back *only* to root
+                # and skip ``_store_provider_state`` for the profile so the
+                # profile does not accrue a shadowing ``providers.<id>``
+                # key that blocks both the root fallback and the write-through
+                # on subsequent calls.
                 if self.provider == "nous":
-                    state = _load_provider_state(auth_store, "nous")
+                    state, source_path = _load_provider_state_with_source(
+                        auth_store, "nous"
+                    )
                     if state is None:
                         return
+                elif self.provider == "openai-codex":
+                    state, source_path = _load_provider_state_with_source(
+                        auth_store, "openai-codex"
+                    )
+                    if not isinstance(state, dict):
+                        return
+                elif self.provider == "xai-oauth":
+                    state, source_path = _load_provider_state_with_source(
+                        auth_store, "xai-oauth"
+                    )
+                    if not isinstance(state, dict):
+                        return
+                else:
+                    return
+
+                global_root = _global_auth_file_path()
+                is_from_root = bool(
+                    source_path is not None
+                    and global_root is not None
+                    and _same_path(source_path, global_root)
+                )
+
+                if self.provider == "nous":
                     state["access_token"] = entry.access_token
                     if entry.refresh_token:
                         state["refresh_token"] = entry.refresh_token
@@ -1082,12 +1135,8 @@ class CredentialPool:
                             state[extra_key] = val
                     if entry.inference_base_url:
                         state["inference_base_url"] = entry.inference_base_url
-                    _store_provider_state(auth_store, "nous", state, set_active=False)
 
                 elif self.provider == "openai-codex":
-                    state = _load_provider_state(auth_store, "openai-codex")
-                    if not isinstance(state, dict):
-                        return
                     tokens = state.get("tokens")
                     if not isinstance(tokens, dict):
                         return
@@ -1096,12 +1145,8 @@ class CredentialPool:
                         tokens["refresh_token"] = entry.refresh_token
                     if entry.last_refresh:
                         state["last_refresh"] = entry.last_refresh
-                    _store_provider_state(auth_store, "openai-codex", state, set_active=False)
 
                 elif self.provider == "xai-oauth":
-                    state = _load_provider_state(auth_store, "xai-oauth")
-                    if not isinstance(state, dict):
-                        return
                     tokens = state.get("tokens")
                     if not isinstance(tokens, dict):
                         return
@@ -1110,16 +1155,26 @@ class CredentialPool:
                         tokens["refresh_token"] = entry.refresh_token
                     if entry.last_refresh:
                         state["last_refresh"] = entry.last_refresh
-                    _store_provider_state(auth_store, "xai-oauth", state, set_active=False)
 
-                else:
-                    return
-
-                _save_auth_store(auth_store)
-                if write_through_to_root and _wt_provider_id:
+                if is_from_root and _wt_provider_id:
+                    # Grant was resolved from root — write back to root
+                    # only.  Do NOT call _store_provider_state on the
+                    # profile auth_store (it would create a shadowing
+                    # providers.<id> key that disables write-through on
+                    # the next refresh — #74339).
+                    # _load_provider_state has root fallback, so the
+                    # profile can always read fresh tokens from root
+                    # without needing its own providers block.
                     _write_through_provider_state_to_global_root(
                         _wt_provider_id, state
                     )
+                else:
+                    # Profile genuinely owns this provider — write to
+                    # the profile store as normal.
+                    _store_provider_state(
+                        auth_store, self.provider, state, set_active=False
+                    )
+                    _save_auth_store(auth_store)
         except Exception as exc:
             logger.debug("Failed to sync %s pool entry back to auth store: %s", self.provider, exc)
 
@@ -2332,31 +2387,75 @@ def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> Tup
         # env vars (COPILOT_GITHUB_TOKEN / GH_TOKEN).  They don't live in
         # the auth store or credential pool, so we resolve them here.
         try:
-            from hermes_cli.copilot_auth import resolve_copilot_token, get_copilot_api_token
+            from hermes_cli.copilot_auth import (
+                COPILOT_ENV_VARS,
+                resolve_copilot_token,
+                get_copilot_api_token,
+            )
+            # All-sources suppression gate BEFORE any work — including the
+            # `gh auth token` subprocess spawn.  resolve_copilot_token()
+            # shells out (~30ms), and the exchange retries 3x with backoff
+            # (~35s worst case); a user who suppressed every copilot source
+            # (hermes auth remove copilot gh_cli) must not pay either on
+            # every pool load (model picker open, /model, agent startup).
+            # Enumerating the full source space here matches what
+            # credential_sources._remove_copilot_gh suppresses, so an
+            # all-suppressed check is stable.
+            copilot_sources = ["gh_cli"] + [f"env:{v}" for v in COPILOT_ENV_VARS]
+            if all(_is_suppressed(provider, s) for s in copilot_sources):
+                return changed, active_sources
             token, source = resolve_copilot_token()
             if token:
+                # ``resolve_copilot_token`` returns exactly "gh auth token"
+                # for the CLI path; env-sourced tokens return the var name.
+                # Match exactly — a substring test classifies GH_TOKEN and
+                # GITHUB_TOKEN as gh_cli, silently bypassing a user's
+                # per-env-var suppression.
+                source_name = "gh_cli" if source == "gh auth token" else f"env:{source}"
+                # Per-source suppression gate (a user may suppress only the
+                # gh CLI path and keep an env var, or vice versa) BEFORE the
+                # network exchange.  The exchange retries 3x with 10s
+                # timeouts and 4.5s total backoff (~35s worst case), so a
+                # source the user already suppressed
+                # must not burn that dead time just to have the entry
+                # discarded afterwards.  Same early-gate pattern every other
+                # singleton branch uses.
+                if _is_suppressed(provider, source_name):
+                    return changed, active_sources
                 api_token, enterprise_base_url = get_copilot_api_token(token)
-                source_name = "gh_cli" if "gh" in source.lower() else f"env:{source}"
-                if not _is_suppressed(provider, source_name):
-                    active_sources.add(source_name)
-                    pconfig = PROVIDER_REGISTRY.get(provider)
-                    # Use enterprise base URL from token exchange if available,
-                    # otherwise fall back to the provider's default.
-                    effective_base_url = enterprise_base_url or (
-                        pconfig.inference_base_url if pconfig else ""
+                # Observability: get_copilot_api_token falls back to returning
+                # the RAW token when the exchange fails. A raw ~40-char token
+                # sent to the Copilot API is routed to the fallback
+                # "copilot-language-server" integrator, whose allowlist omits
+                # enterprise-only models (claude-opus-4.8) → HTTP 400 on every
+                # turn. exchange_copilot_token now retries + reuses a persisted
+                # JWT, so this should be rare; surface it at WARNING so a
+                # recurrence is visible in logs instead of failing silently.
+                if api_token == token and not enterprise_base_url:
+                    logger.warning(
+                        "Copilot token exchange degraded to RAW token (exchange "
+                        "unavailable); enterprise-only models may 400 with "
+                        "model_not_available_for_integrator until exchange recovers."
                     )
-                    changed |= _upsert_entry(
-                        entries,
-                        provider,
-                        source_name,
-                        {
-                            "source": source_name,
-                            "auth_type": AUTH_TYPE_API_KEY,
-                            "access_token": api_token,
-                            "base_url": effective_base_url,
-                            "label": source,
-                        },
-                    )
+                active_sources.add(source_name)
+                pconfig = PROVIDER_REGISTRY.get(provider)
+                # Use enterprise base URL from token exchange if available,
+                # otherwise fall back to the provider's default.
+                effective_base_url = enterprise_base_url or (
+                    pconfig.inference_base_url if pconfig else ""
+                )
+                changed |= _upsert_entry(
+                    entries,
+                    provider,
+                    source_name,
+                    {
+                        "source": source_name,
+                        "auth_type": AUTH_TYPE_API_KEY,
+                        "access_token": api_token,
+                        "base_url": effective_base_url,
+                        "label": source,
+                    },
+                )
         except Exception as exc:
             logger.debug("Copilot token seed failed: %s", exc)
 
@@ -2505,6 +2604,20 @@ def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> Tup
 def _seed_from_env(provider: str, entries: List[PooledCredential]) -> Tuple[bool, Set[str]]:
     changed = False
     active_sources: Set[str] = set()
+
+    # Copilot has its own dedicated seeding branch (see `_seed_credentials`
+    # for provider == "copilot") which exchanges the raw ghu_ OAuth token
+    # for the ~437-char api token via `get_copilot_api_token`. If we let
+    # the generic env-var loop below run for copilot, it re-reads
+    # COPILOT_GITHUB_TOKEN from .env and shoves the RAW 40-char token in
+    # as `access_token`, overwriting the correctly-exchanged token. That
+    # bypasses the Copilot token exchange entirely and causes 400s with
+    # "not available for integrator copilot-language-server" (the server's
+    # fallback integrator when it receives a raw OAuth token instead of
+    # an api token). Skip the generic loop here — the copilot-specific
+    # branch is authoritative.
+    if provider == "copilot":
+        return False, active_sources
 
     # Prefer ~/.hermes/.env over os.environ — the user's config file is the
     # authoritative source for Hermes credentials. Stale env vars from parent
